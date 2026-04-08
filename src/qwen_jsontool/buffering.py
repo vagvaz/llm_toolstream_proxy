@@ -69,7 +69,7 @@ def _try_repair_json(text: str) -> str | None:
     Common truncation patterns:
     - Missing closing brace: '{"key": "val"'
     - Missing closing bracket for arrays
-    - Trailing comma: '{"key": "val",}'
+    - Trailing comma before closing brace: '{"key": "val",}'
     """
     if not text:
         return text
@@ -77,16 +77,19 @@ def _try_repair_json(text: str) -> str | None:
         return text
 
     repaired = text.rstrip()
-    open_braces = repaired.count("{") - repaired.count("}")
-    open_brackets = repaired.count("[") - repaired.count("]")
-
-    if open_braces > 0:
-        repaired += "}" * open_braces
-    if open_brackets > 0:
-        repaired += "]" * open_brackets
 
     if repaired.endswith(","):
         repaired = repaired[:-1]
+    elif repaired.endswith(",}"):
+        repaired = repaired[:-2] + "}"
+    elif repaired.endswith(",]"):
+        repaired = repaired[:-2] + "]"
+
+    open_braces = repaired.count("{") - repaired.count("}")
+    open_brackets = repaired.count("[") - repaired.count("]")
+
+    repaired += "]" * open_brackets
+    repaired += "}" * open_braces
 
     if _is_valid_json(repaired):
         return repaired

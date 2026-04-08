@@ -185,7 +185,7 @@ class SSETransformer:
                 for tc_delta in tool_call_deltas:
                     buffered_events.extend(self.buffer.process_delta(tc_delta))
 
-                if non_empty_delta or not buffered_events:
+                if non_empty_delta:
                     output_lines.append(encode_sse_event(cleaned))
 
                 if buffered_events:
@@ -197,6 +197,14 @@ class SSETransformer:
             output_lines.append(encode_sse_event(parsed))
 
         return output_lines
+
+    def flush(self) -> list[str]:
+        """Public flush: emit any remaining buffered tool calls and [DONE].
+
+        Called when the upstream SSE stream sends [DONE] or when the
+        connection closes. Also accessible for testing.
+        """
+        return self._flush_and_done()
 
     def _flush_and_done(self) -> list[str]:
         """Emit any remaining buffered tool calls followed by the [DONE] sentinel."""
