@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "aiohttp>=3.9",
+    "loguru>=0.7",
 ]
 
 [project.optional-dependencies]

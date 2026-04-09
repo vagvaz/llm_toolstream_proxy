@@ -18,10 +18,9 @@ Design:
 from __future__ import annotations
 
 import json
-import logging
 from dataclasses import dataclass, field
 
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 def _sanitize_name(value: object) -> str | None:

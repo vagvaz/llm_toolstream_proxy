@@ -17,13 +17,12 @@ are buffered until their metadata is complete.
 from __future__ import annotations
 
 import json
-import logging
 from copy import deepcopy
 from typing import AsyncIterator
 
-from .buffering import ToolCallBuffer
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+from .buffering import ToolCallBuffer
 
 DONE_SENTINEL = "[DONE]"
 

@@ -13,16 +13,14 @@ the cleaned SSE stream is returned to opencode.
 from __future__ import annotations
 
 import json
-import logging
 from typing import AsyncIterator
 
 import aiohttp
 from aiohttp import web
+from loguru import logger
 
 from . import config
 from .sse import SSETransformer
-
-logger = logging.getLogger(__name__)
 
 STREAMING_ROUTES = {
     "/v1/chat/completions",

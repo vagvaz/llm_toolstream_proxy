@@ -8,6 +8,7 @@ LITELLM_URL: str = os.getenv("LITELLM_URL", "http://localhost:4000")
 PROXY_HOST: str = os.getenv("PROXY_HOST", "0.0.0.0")
 PROXY_PORT: int = int(os.getenv("PROXY_PORT", "8787"))
 LOG_LEVEL: str = os.getenv("PROXY_LOG_LEVEL", "INFO").upper()
+LOG_FILE: str = os.getenv("PROXY_LOG_FILE", "llm_proxy.log")
 BUFFER_TOOL_CALLS: bool = os.getenv("PROXY_BUFFER_TOOLS", "true").lower() in (
     "true",
     "1",

@@ -60,7 +60,8 @@ export OPENCODE_API_URL=http://localhost:8787
 | `LITELLM_URL` | `http://localhost:4000` | Upstream litellm URL |
 | `PROXY_HOST` | `0.0.0.0` | Host to bind the proxy to |
 | `PROXY_PORT` | `8787` | Port to listen on |
-| `PROXY_LOG_LEVEL` | `INFO` | Logging level |
+| `PROXY_LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
+| `PROXY_LOG_FILE` | `llm_proxy.log` | Path to log file (rotation at 10MB, 7-day retention) |
 | `PROXY_BUFFER_TOOLS` | `true` | Enable/disable tool call buffering |
 | `PROXY_VALIDATE_JSON` | `true` | Validate/repair JSON arguments on flush |
 | `PROXY_STREAM_TIMEOUT` | `300` | Stream read timeout in seconds |
