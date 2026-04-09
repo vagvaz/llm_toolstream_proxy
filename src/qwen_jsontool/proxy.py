@@ -119,6 +119,16 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     body = await request.read()
     body_json = await _read_request_body(request)
     is_streaming = await _is_streaming_request(body_json)
+    model = body_json.get("model", "unknown")
+
+    logger.info(
+        "%s %s model=%s streaming=%s buffered=%s",
+        method,
+        path,
+        model,
+        is_streaming,
+        is_streaming and config.BUFFER_TOOL_CALLS and path in STREAMING_ROUTES,
+    )
 
     if is_streaming and config.BUFFER_TOOL_CALLS and path in STREAMING_ROUTES:
         return await _handle_streaming(request, url, headers, body)
@@ -135,6 +145,8 @@ async def _handle_streaming(
     """Handle a streaming request with tool call buffering."""
     headers["Accept"] = "text/event-stream"
     headers["Cache-Control"] = "no-cache"
+
+    logger.info("Starting streaming proxy to %s", url)
 
     response = web.StreamResponse(
         status=200,
@@ -159,6 +171,7 @@ async def _handle_streaming(
         ):
             await response.write(chunk)
 
+    logger.info("Streaming proxy request completed")
     await response.write_eof()
     return response
 

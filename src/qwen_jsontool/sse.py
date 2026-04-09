@@ -162,6 +162,7 @@ class SSETransformer:
 
         if parsed.get("__done__"):
             self._done = True
+            logger.info("SSE stream ended, flushing remaining buffered tool calls")
             return self._flush_and_done()
 
         tool_call_deltas, cleaned = _extract_tool_calls(parsed)
@@ -179,6 +180,11 @@ class SSETransformer:
                     non_empty_delta = True
 
         if tool_call_deltas:
+            logger.debug(
+                "SSE chunk has %d tool_call deltas, non_empty_delta=%s",
+                len(tool_call_deltas),
+                non_empty_delta,
+            )
             for choice in choices:
                 choice_index = choice.get("index", 0)
                 buffered_events: list[dict] = []
@@ -189,6 +195,11 @@ class SSETransformer:
                     output_lines.append(encode_sse_event(cleaned))
 
                 if buffered_events:
+                    logger.debug(
+                        "Emitting %d buffered tool call events for choice %d",
+                        len(buffered_events),
+                        choice_index,
+                    )
                     for event_chunk in _inject_tool_call_events(
                         parsed, choice_index, buffered_events
                     ):
@@ -212,6 +223,10 @@ class SSETransformer:
 
         flush_events = self.buffer.flush()
         if flush_events:
+            logger.info(
+                "Flushing %d remaining tool call(s) on stream end",
+                len(flush_events),
+            )
             base_chunk: dict = {
                 "id": "chatcmpl-tool-buffer",
                 "object": "chat.completion.chunk",

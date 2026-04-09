@@ -160,11 +160,30 @@ class ToolCallBuffer:
         tc_id = _sanitize_id(raw_id)
         args = raw_args if raw_args is not None else ""
 
+        logger.debug(
+            "Processing tool call delta: index=%d, raw_id=%r, sanitized_name=%r, "
+            "args_len=%d, raw_name=%r",
+            index,
+            raw_id,
+            name,
+            len(args),
+            raw_name,
+        )
+
         call = self._get_or_create(index)
 
+        is_new_call = index not in self.calls or call == self.calls[index]
+
         if tc_id and not call.id:
+            logger.debug("Tool call index %d: received id=%r", index, tc_id)
             call.id = tc_id
         if name and not call.name:
+            logger.info(
+                "Tool call index %d: received name=%r (was %r)",
+                index,
+                name,
+                call.name,
+            )
             call.name = name
         call.type = raw_type or call.type
 
@@ -175,6 +194,12 @@ class ToolCallBuffer:
 
         if call.started:
             if args:
+                logger.debug(
+                    "Tool call %r index %d: streaming argument delta (%d bytes)",
+                    call.name,
+                    index,
+                    len(args),
+                )
                 events.append(
                     {
                         "index": index,
@@ -183,6 +208,13 @@ class ToolCallBuffer:
                 )
         elif call.is_complete:
             call.started = True
+            logger.info(
+                "Tool call %r index %d: emitting start (id=%r, buffered_args=%d bytes)",
+                call.name,
+                index,
+                call.id,
+                len(call.arguments),
+            )
             events.append(
                 {
                     "index": index,
@@ -196,6 +228,12 @@ class ToolCallBuffer:
             )
             if call.arguments:
                 accumulated = call.arguments
+                logger.debug(
+                    "Tool call %r index %d: emitting accumulated arguments (%d bytes)",
+                    call.name,
+                    index,
+                    len(accumulated),
+                )
                 events.append(
                     {
                         "index": index,
