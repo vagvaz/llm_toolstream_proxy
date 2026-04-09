@@ -8,3 +8,21 @@ wheels/
 
 # Virtual environments
 .venv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+llm_proxy.log
+*.log.gz
+
+# Test / cache
+.pytest_cache/
+.mypy_cache/
