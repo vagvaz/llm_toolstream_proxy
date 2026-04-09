@@ -13,7 +13,7 @@ the cleaned SSE stream is returned to opencode.
 from __future__ import annotations
 
 import json
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 import aiohttp
 from aiohttp import web
@@ -43,17 +43,18 @@ async def handle_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "version": config.LITELLM_URL})
 
 
-async def _is_streaming_request(body: dict) -> bool:
+async def _is_streaming_request(body: dict[str, Any]) -> bool:
     return body.get("stream", False) is True
 
 
-async def _read_request_body(request: web.Request) -> dict:
+async def _read_request_body(request: web.Request) -> dict[str, Any]:
     """Read and parse the JSON request body."""
     raw = await request.read()
     if not raw:
         return {}
     try:
-        return json.loads(raw)
+        result: Any = json.loads(raw)
+        return result if isinstance(result, dict) else {}
     except json.JSONDecodeError:
         return {}
 

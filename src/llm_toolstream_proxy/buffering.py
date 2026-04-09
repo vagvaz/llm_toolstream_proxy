@@ -33,7 +33,8 @@ Argument handling:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Any
 
 from loguru import logger
 
@@ -152,7 +153,7 @@ class ToolCallBuffer:
             self.calls[index] = BufferedToolCall()
         return self.calls[index]
 
-    def process_delta(self, delta_tc: dict) -> list[dict]:
+    def process_delta(self, delta_tc: dict[str, Any]) -> list[dict[str, Any]]:
         """Process a single tool_call delta from a streaming chunk.
 
         Args:
@@ -203,7 +204,7 @@ class ToolCallBuffer:
         if args:
             call.arguments += args
 
-        events: list[dict] = []
+        events: list[dict[str, Any]] = []
 
         if call.started:
             if args:
@@ -323,7 +324,7 @@ class ToolCallBuffer:
                 len(call.arguments),
             )
 
-    def flush(self) -> list[dict]:
+    def flush(self) -> list[dict[str, Any]]:
         """Flush any remaining buffered tool calls on stream end.
 
         Called when the SSE stream sends ``[DONE]``. Handles three cases:
@@ -337,7 +338,7 @@ class ToolCallBuffer:
         Returns:
             List of tool_call deltas to emit before the ``[DONE]`` sentinel.
         """
-        events: list[dict] = []
+        events: list[dict[str, Any]] = []
 
         for index in sorted(self.calls.keys()):
             call = self.calls[index]

@@ -35,6 +35,11 @@ namespace_packages = true
 explicit_package_bases = true
 mypy_path = "src"
 
+[[tool.mypy.overrides]]
+module = "tests.*"
+strict = false
+disable_error_code = ["no-untyped-def", "type-arg"]
+
 [project.scripts]
 llm-toolstream-proxy = "llm_toolstream_proxy.main:main"
 

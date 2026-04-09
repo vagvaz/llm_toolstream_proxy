@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 from copy import deepcopy
-from typing import AsyncIterator
+from typing import Any
 
 from loguru import logger
 
@@ -27,7 +27,7 @@ from .buffering import ToolCallBuffer
 DONE_SENTINEL = "[DONE]"
 
 
-def parse_sse_line(line: str) -> dict | None:
+def parse_sse_line(line: str) -> dict[str, Any] | None:
     """Parse a single ``data: ...`` SSE line into a dict.
 
     Returns None for:
@@ -48,13 +48,14 @@ def parse_sse_line(line: str) -> dict | None:
         return {"__done__": True}
 
     try:
-        return json.loads(payload)
+        result: Any = json.loads(payload)
+        return result if isinstance(result, dict) else None
     except json.JSONDecodeError:
         logger.warning("Failed to parse SSE JSON: %s", payload[:200])
         return None
 
 
-def encode_sse_event(data: dict) -> str:
+def encode_sse_event(data: dict[str, Any]) -> str:
     """Encode a dict back into an SSE ``data:`` line with trailing newlines."""
     return f"data: {json.dumps(data, separators=(',', ':'))}\n\n"
 
@@ -64,7 +65,9 @@ def encode_sse_done() -> str:
     return f"data: {DONE_SENTINEL}\n\n"
 
 
-def _extract_tool_calls(chunk: dict) -> tuple[list[dict], dict]:
+def _extract_tool_calls(
+    chunk: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Extract tool_calls from a streaming chunk and return a cleaned chunk
     without tool_calls.
 
@@ -74,7 +77,7 @@ def _extract_tool_calls(chunk: dict) -> tuple[list[dict], dict]:
         deltas, but preserves all other fields (role, content, reasoning, etc.)
     """
     cleaned = deepcopy(chunk)
-    tool_call_deltas: list[dict] = []
+    tool_call_deltas: list[dict[str, Any]] = []
 
     choices = cleaned.get("choices", [])
     for choice in choices:
@@ -88,17 +91,17 @@ def _extract_tool_calls(chunk: dict) -> tuple[list[dict], dict]:
 
 
 def _inject_tool_call_events(
-    chunk: dict,
+    chunk: dict[str, Any],
     choice_index: int,
-    tool_call_deltas: list[dict],
-) -> list[dict]:
+    tool_call_deltas: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     """Create properly formed SSE chunk dicts with tool_call deltas
     injected into a specific choice.
 
     Each delta becomes its own chunk so that downstream consumers
     process them one at a time, matching the original streaming behavior.
     """
-    events: list[dict] = []
+    events: list[dict[str, Any]] = []
     for tc_delta in tool_call_deltas:
         new_chunk = deepcopy(chunk)
         choices = new_chunk.get("choices", [])
@@ -186,7 +189,8 @@ class SSETransformer:
                 for idx in finish_indices:
                     if self.buffer.calls[idx].name is not None:
                         logger.debug(
-                            "Finish reason %r for choice %d: marking tool call %d as finished",
+                            "Finish reason %r for choice %d: "
+                            "marking tool call %d finished",
                             finish_reason,
                             choice_index,
                             idx,
@@ -201,7 +205,7 @@ class SSETransformer:
             )
             for choice in choices:
                 choice_index = choice.get("index", 0)
-                buffered_events: list[dict] = []
+                buffered_events: list[dict[str, Any]] = []
                 for tc_delta in tool_call_deltas:
                     buffered_events.extend(self.buffer.process_delta(tc_delta))
 
@@ -241,7 +245,7 @@ class SSETransformer:
                 "Flushing %d remaining tool call(s) on stream end",
                 len(flush_events),
             )
-            base_chunk: dict = {
+            base_chunk: dict[str, Any] = {
                 "id": "chatcmpl-tool-buffer",
                 "object": "chat.completion.chunk",
                 "created": 0,

@@ -1,7 +1,5 @@
 """Tests for the ToolCallBuffer core algorithm."""
 
-import json
-import pytest
 
 from llm_toolstream_proxy.buffering import (
     BufferedToolCall,
