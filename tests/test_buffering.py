@@ -3,7 +3,7 @@
 import json
 import pytest
 
-from qwen_jsontool.buffering import (
+from llm_toolstream_proxy.buffering import (
     BufferedToolCall,
     ToolCallBuffer,
     _is_valid_json,

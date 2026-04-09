@@ -1,4 +1,4 @@
-"""Configuration for qwen-jsontool proxy via environment variables."""
+"""Configuration for llm-toolstream-proxy via environment variables."""
 
 from __future__ import annotations
 

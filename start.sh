@@ -25,7 +25,7 @@ export PROXY_STREAM_TIMEOUT
 
 mkdir -p "$(dirname "$PROXY_LOG_FILE")" 2>/dev/null || true
 
-echo "Starting qwen-jsontool proxy"
+echo "Starting llm-toolstream-proxy"
 echo "  LITELLM_URL        = $LITELLM_URL"
 echo "  PROXY_HOST          = $PROXY_HOST"
 echo "  PROXY_PORT          = $PROXY_PORT"
@@ -38,7 +38,7 @@ echo "  PROXY_STREAM_TIMEOUT= $PROXY_STREAM_TIMEOUT"
 echo ""
 
 exec gunicorn \
-    qwen_jsontool.main:create_app() \
+    llm_toolstream_proxy.main:create_app() \
     --bind "${PROXY_HOST}:${PROXY_PORT}" \
     --workers "$PROXY_WORKERS" \
     --worker-class aiohttp.worker.GunicornWebWorker \

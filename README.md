@@ -1,6 +1,6 @@
-# qwen-jsontool
+# llm-toolstream-proxy
 
-Streaming SSE proxy that buffers and reassembles incomplete tool calls from Qwen/MiniMax models via litellm.
+Streaming SSE proxy that buffers and reassembles incomplete tool calls from LLM backends (Qwen, MiniMax, vllm, ollama) via litellm.
 
 ## Problem
 
@@ -43,7 +43,7 @@ pip install -e .
 export LITELLM_URL=http://your-litellm-host:4000
 
 # Start the proxy
-qwen-jsontool
+llm-toolstream-proxy
 ```
 
 Then point opencode at the proxy:

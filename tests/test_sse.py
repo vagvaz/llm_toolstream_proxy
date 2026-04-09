@@ -2,7 +2,7 @@
 
 import json
 
-from qwen_jsontool.sse import (
+from llm_toolstream_proxy.sse import (
     SSETransformer,
     encode_sse_done,
     encode_sse_event,

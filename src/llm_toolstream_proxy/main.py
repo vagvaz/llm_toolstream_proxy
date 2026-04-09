@@ -1,4 +1,4 @@
-"""Entry point for qwen-jsontool proxy server."""
+"""Entry point for llm-toolstream-proxy server."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def setup_logging() -> None:
     )
 
     logger.info(
-        "qwen-jsontool logging initialized | level={} | file={}",
+        "llm-toolstream-proxy logging initialized | level={} | file={}",
         config.LOG_LEVEL,
         config.LOG_FILE,
     )
@@ -55,7 +55,7 @@ def main() -> None:
 
     app = create_app()
     logger.info(
-        "qwen-jsontool proxy starting on {}:{} -> {} (buffer_tool_calls={}, validate_json={})",
+        "llm-toolstream-proxy starting on {}:{} -> {} (buffer_tool_calls={}, validate_json={})",
         config.PROXY_HOST,
         config.PROXY_PORT,
         config.LITELLM_URL,
