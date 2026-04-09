@@ -13,6 +13,21 @@ Design:
 - Arguments stream through immediately once the call has been "started".
 - On stream end ([DONE]), flushes any buffered tool calls that are now complete,
   discards incomplete ones.
+
+Argument handling:
+  Arguments are string fragments per the OpenAI streaming spec. Each delta's
+  ``function.arguments`` is a substring of the final JSON string. We concatenate
+  them with ``+=`` which is the correct merging policy — they are NOT separate
+  JSON objects to be merged, they are text fragments to be appended.
+
+  For calls that were **buffered** (name/id not yet available when args arrived),
+  we replay all accumulated arguments as a single delta when the call starts.
+  For calls that started normally, individual deltas pass through as-is.
+
+  At finish time, we validate accumulated arguments and attempt JSON repair
+  for buffered-only calls. For started calls (arguments already streamed to
+  the client), we cannot repair because the client has already received the
+  raw fragments — we can only validate and log a warning.
 """
 
 from __future__ import annotations
@@ -105,6 +120,7 @@ class BufferedToolCall:
     type: str = "function"
     arguments: str = ""
     started: bool = False
+    finished: bool = False
 
     @property
     def is_complete(self) -> bool:
@@ -170,8 +186,6 @@ class ToolCallBuffer:
         )
 
         call = self._get_or_create(index)
-
-        is_new_call = index not in self.calls or call == self.calls[index]
 
         if tc_id and not call.id:
             logger.debug("Tool call index %d: received id=%r", index, tc_id)
@@ -253,16 +267,72 @@ class ToolCallBuffer:
 
         return events
 
+    def finish_call(self, index: int) -> None:
+        """Mark a tool call as finished and validate its accumulated arguments.
+
+        Called when the stream sends a finish_reason of 'tool_calls' or 'stop'
+        for a choice. Validates accumulated arguments and logs warnings for
+        invalid JSON.
+
+        For calls that were **started** (argument deltas already streamed to
+        the client), we cannot repair the arguments because the client has
+        already received the raw fragments. We can only validate and log.
+
+        For calls that were **never started** (still buffered), repair will
+        happen in ``flush()`` which emits the complete call.
+        """
+        call = self._get_or_create(index)
+        call.finished = True
+
+        if not call.arguments:
+            logger.debug(
+                "Tool call %r index %d: finished with empty arguments",
+                call.name,
+                index,
+            )
+            return
+
+        if not self.validate_json:
+            return
+
+        if _is_valid_json(call.arguments):
+            logger.debug(
+                "Tool call %r index %d: finished, arguments valid JSON (%d bytes)",
+                call.name,
+                index,
+                len(call.arguments),
+            )
+            return
+
+        if call.started:
+            logger.warning(
+                "Tool call %r index %d: finished with INVALID JSON arguments "
+                "(%d bytes). Arguments were already streamed to client — "
+                "cannot repair. Accumulated: %s",
+                call.name,
+                index,
+                len(call.arguments),
+                call.arguments[:200],
+            )
+        else:
+            logger.warning(
+                "Tool call %r index %d: finished with invalid JSON arguments "
+                "(%d bytes). Will attempt repair in flush().",
+                call.name,
+                index,
+                len(call.arguments),
+            )
+
     def flush(self) -> list[dict]:
         """Flush any remaining buffered tool calls on stream end.
 
-        Called when the SSE stream sends ``[DONE]``. For tool calls that have
-        been started (initial chunk already emitted), nothing to do—the client
-        will handle the rest. For tool calls that are still buffered (complete
-        metadata arrived but we never got a chance to emit the start), emit
-        them as a single complete chunk.
+        Called when the SSE stream sends ``[DONE]``. Handles three cases:
 
-        Tool calls missing id or name are discarded with a warning.
+        1. **Started but not finished**: Validate arguments. Cannot repair
+           (already streamed to client). Log warning.
+        2. **Buffered and complete**: Emit the full tool call with repaired
+           arguments if needed.
+        3. **Still incomplete (missing id or name)**: Discard with a warning.
 
         Returns:
             List of tool_call deltas to emit before the ``[DONE]`` sentinel.
@@ -273,6 +343,21 @@ class ToolCallBuffer:
             call = self.calls[index]
 
             if call.started:
+                if not call.finished:
+                    call.finished = True
+                    if (
+                        call.arguments
+                        and self.validate_json
+                        and not _is_valid_json(call.arguments)
+                    ):
+                        logger.warning(
+                            "Flush: tool call %r index %d has invalid JSON "
+                            "arguments (%d bytes) but they were already streamed. "
+                            "Cannot repair.",
+                            call.name,
+                            index,
+                            len(call.arguments),
+                        )
                 continue
 
             if not call.is_complete:
@@ -304,6 +389,7 @@ class ToolCallBuffer:
                         index,
                     )
 
+            call.finished = True
             events.append(
                 {
                     "index": index,

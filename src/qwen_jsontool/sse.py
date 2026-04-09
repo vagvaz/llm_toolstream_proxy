@@ -178,6 +178,21 @@ class SSETransformer:
                 ):
                     non_empty_delta = True
 
+        for ch in choices:
+            finish_reason = ch.get("finish_reason")
+            choice_index = ch.get("index", 0)
+            if finish_reason == "tool_calls" or finish_reason == "stop":
+                finish_indices = list(self.buffer.calls.keys())
+                for idx in finish_indices:
+                    if self.buffer.calls[idx].name is not None:
+                        logger.debug(
+                            "Finish reason %r for choice %d: marking tool call %d as finished",
+                            finish_reason,
+                            choice_index,
+                            idx,
+                        )
+                        self.buffer.finish_call(idx)
+
         if tool_call_deltas:
             logger.debug(
                 "SSE chunk has %d tool_call deltas, non_empty_delta=%s",
