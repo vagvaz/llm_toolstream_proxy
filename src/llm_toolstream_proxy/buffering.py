@@ -185,8 +185,8 @@ class ToolCallBuffer:
         args = raw_args if raw_args is not None else ""
 
         logger.debug(
-            "Processing tool call delta: index=%d, raw_id=%r, sanitized_name=%r, "
-            "args_len=%d, raw_name=%r",
+            "Processing tool call delta: index={}, raw_id={!r}, sanitized_name={!r}, "
+            "args_len={}, raw_name={!r}",
             index,
             raw_id,
             name,
@@ -199,18 +199,18 @@ class ToolCallBuffer:
         # Guard: reject new tool calls beyond the limit
         if index not in self.calls and len(self.calls) >= self.max_tool_calls:
             logger.warning(
-                "Rejecting tool call at index %d: exceeded max_tool_calls=%d",
+                "Rejecting tool call at index {}: exceeded max_tool_calls={}",
                 index,
                 self.max_tool_calls,
             )
             return []
 
         if tc_id and not call.id:
-            logger.debug("Tool call index %d: received id=%r", index, tc_id)
+            logger.debug("Tool call index {}: received id={}", index, tc_id)
             call.id = tc_id
         if name and not call.name:
             logger.info(
-                "Tool call index %d: received name=%r (was %r)",
+                "Tool call index {}: received name={!r} (was {!r})",
                 index,
                 name,
                 call.name,
@@ -221,7 +221,7 @@ class ToolCallBuffer:
         if args:
             if len(call.arguments) + len(args) > self.max_arguments_size:
                 logger.warning(
-                    "Tool call %r index %d: arguments exceed max size (%d bytes), "
+                    "Tool call {!r} index {}: arguments exceed max size ({} bytes), "
                     "truncating further deltas",
                     call.name,
                     index,
@@ -239,7 +239,7 @@ class ToolCallBuffer:
         if call.started:
             if args:
                 logger.debug(
-                    "Tool call %r index %d: streaming argument delta (%d bytes)",
+                    "Tool call {!r} index {}: streaming argument delta ({} bytes)",
                     call.name,
                     index,
                     len(args),
@@ -253,7 +253,8 @@ class ToolCallBuffer:
         elif call.is_complete:
             call.started = True
             logger.info(
-                "Tool call %r index %d: emitting start (id=%r, buffered_args=%d bytes)",
+                "Tool call {!r} index {}: emitting start "
+                "(id={!r}, buffered_args={} bytes)",
                 call.name,
                 index,
                 call.id,
@@ -273,7 +274,8 @@ class ToolCallBuffer:
             if call.arguments:
                 accumulated = call.arguments
                 logger.debug(
-                    "Tool call %r index %d: emitting accumulated arguments (%d bytes)",
+                    "Tool call {!r} index {}: emitting accumulated "
+                    "arguments ({} bytes)",
                     call.name,
                     index,
                     len(accumulated),
@@ -288,8 +290,8 @@ class ToolCallBuffer:
                 pass
         else:
             logger.debug(
-                "Buffering incomplete tool call at index %d "
-                "(id=%r, name=%r, args_so_far=%d chars)",
+                "Buffering incomplete tool call at index {} "
+                "(id={!r}, name={!r}, args_so_far={} chars)",
                 index,
                 call.id,
                 call.name,
@@ -317,7 +319,7 @@ class ToolCallBuffer:
 
         if not call.arguments:
             logger.debug(
-                "Tool call %r index %d: finished with empty arguments",
+                "Tool call {!r} index {}: finished with empty arguments",
                 call.name,
                 index,
             )
@@ -328,7 +330,7 @@ class ToolCallBuffer:
 
         if _is_valid_json(call.arguments):
             logger.debug(
-                "Tool call %r index %d: finished, arguments valid JSON (%d bytes)",
+                "Tool call {!r} index {}: finished, arguments valid JSON ({} bytes)",
                 call.name,
                 index,
                 len(call.arguments),
@@ -337,9 +339,9 @@ class ToolCallBuffer:
 
         if call.started:
             logger.warning(
-                "Tool call %r index %d: finished with INVALID JSON arguments "
-                "(%d bytes). Arguments were already streamed to client — "
-                "cannot repair. Accumulated: %s",
+                "Tool call {!r} index {}: finished with INVALID JSON arguments "
+                "({} bytes). Arguments were already streamed to client — "
+                "cannot repair. Accumulated: {}",
                 call.name,
                 index,
                 len(call.arguments),
@@ -347,8 +349,8 @@ class ToolCallBuffer:
             )
         else:
             logger.warning(
-                "Tool call %r index %d: finished with invalid JSON arguments "
-                "(%d bytes). Will attempt repair in flush().",
+                "Tool call {!r} index {}: finished with invalid JSON arguments "
+                "({} bytes). Will attempt repair in flush().",
                 call.name,
                 index,
                 len(call.arguments),
@@ -382,8 +384,8 @@ class ToolCallBuffer:
                         and not _is_valid_json(call.arguments)
                     ):
                         logger.warning(
-                            "Flush: tool call %r index %d has invalid JSON "
-                            "arguments (%d bytes) but they were already streamed. "
+                            "Flush: tool call {!r} index {} has invalid JSON "
+                            "arguments ({} bytes) but they were already streamed. "
                             "Cannot repair.",
                             call.name,
                             index,
@@ -393,8 +395,8 @@ class ToolCallBuffer:
 
             if not call.is_complete:
                 logger.warning(
-                    "Discarding incomplete tool call at index %d: "
-                    "id=%r, name=%r, args_so_far=%d chars",
+                    "Discarding incomplete tool call at index {}: "
+                    "id={!r}, name={!r}, args_so_far={} chars",
                     index,
                     call.id,
                     call.name,
@@ -408,13 +410,13 @@ class ToolCallBuffer:
                 if repaired is not None:
                     arguments = repaired
                     logger.info(
-                        "Repaired JSON arguments for tool call %r at index %d",
+                        "Repaired JSON arguments for tool call {!r} at index {}",
                         call.name,
                         index,
                     )
                 else:
                     logger.warning(
-                        "Tool call %r at index %d has invalid JSON arguments; "
+                        "Tool call {!r} at index {} has invalid JSON arguments; "
                         "emitting as-is",
                         call.name,
                         index,

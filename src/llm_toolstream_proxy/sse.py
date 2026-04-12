@@ -50,7 +50,7 @@ def parse_sse_line(line: str) -> dict[str, Any] | None:
         result: Any = json.loads(payload)
         return result if isinstance(result, dict) else None
     except json.JSONDecodeError:
-        logger.warning("Failed to parse SSE JSON: %s", payload[:200])
+        logger.warning("Failed to parse SSE JSON: {}", payload[:200])
         return None
 
 
@@ -167,9 +167,14 @@ class SSETransformer:
             max_tool_calls=max_tool_calls,
         )
         self._done = False
+        self._line_buffer: list[str] = []
 
     def process_raw(self, raw_line: str) -> list[str]:
         """Process a raw SSE line from upstream.
+
+        Handles multi-line SSE events by buffering lines until a
+        complete event (blank line) is received. Multiple ``data:``
+        lines within a single event are concatenated per the SSE spec.
 
         Args:
             raw_line: A single line from the SSE stream (may include
@@ -178,22 +183,71 @@ class SSETransformer:
         Returns:
             List of SSE-formatted strings (``data: ...\\n\\n``) to emit
             to the downstream client. May be empty if tool calls are still
-            being buffered.
+            being buffered or if the event is incomplete.
         """
         if self._done:
             return []
 
-        parsed = parse_sse_line(raw_line)
-        if parsed is None:
-            return []
+        # Split the raw input into individual lines and buffer them
+        # until we see a blank line (event boundary)
+        output_lines: list[str] = []
 
-        if parsed.get("__done__"):
+        # Split on newlines to handle cases where upstream sends multiple
+        # lines in a single read
+        lines = raw_line.split("\n")
+
+        for line in lines:
+            stripped = line.strip()
+
+            if stripped == "":
+                # Blank line = end of event, process buffered data
+                if self._line_buffer:
+                    data_lines = [
+                        line for line in self._line_buffer if line.startswith("data:")
+                    ]
+                    self._line_buffer = []
+
+                    if not data_lines:
+                        continue
+
+                    # Join multi-line data per SSE spec
+                    # For our JSON use case, concatenate without newlines
+                    payloads = [line[len("data:") :].strip() for line in data_lines]
+
+                    if len(payloads) == 1:
+                        payload = payloads[0]
+                    else:
+                        # Multi-line data: join with \n per SSE spec
+                        payload = "\n".join(payloads)
+
+                    # Process the complete event
+                    event_output = self._process_complete_event(payload)
+                    output_lines.extend(event_output)
+                continue
+
+            # Accumulate non-empty lines
+            self._line_buffer.append(line)
+
+        return output_lines
+
+    def _process_complete_event(self, payload: str) -> list[str]:
+        """Process a complete SSE event payload (after line joining)."""
+        if payload == DONE_SENTINEL:
             self._done = True
             logger.info("SSE stream ended, flushing remaining buffered tool calls")
             return self._flush_and_done()
 
+        try:
+            parsed: Any = json.loads(payload)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse SSE JSON: {}", payload[:200])
+            return []
+
+        if not isinstance(parsed, dict):
+            return []
+
         # Fast path: if the chunk has no tool_calls, pass through as-is
-        # without re-encoding. This avoids JSON parse → deepcopy → re-encode
+        # without re-encoding. This avoids JSON parse → re-encode
         # for the common case of content-only chunks.
         has_tool_calls = False
         choices = parsed.get("choices", [])
@@ -213,23 +267,16 @@ class SSETransformer:
                     for idx in finish_indices:
                         if self.buffer.calls[idx].name is not None:
                             logger.debug(
-                                "Finish reason %r for choice %d: "
-                                "marking tool call %d finished",
+                                "Finish reason {} for choice {}: "
+                                "marking tool call {} finished",
                                 finish_reason,
                                 choice_index,
                                 idx,
                             )
                             self.buffer.finish_call(idx)
 
-            # Pass through the original raw line without re-encoding
-            stripped = raw_line.strip()
-            if stripped and stripped.startswith("data:"):
-                return [
-                    raw_line
-                    if raw_line.endswith("\n\n")
-                    else raw_line.rstrip("\n") + "\n\n"
-                ]
-            return [raw_line]
+            # Re-encode the parsed event for passthrough
+            return [f"data: {json.dumps(parsed, separators=(',', ':'))}\n\n"]
 
         tool_call_deltas, cleaned = _extract_tool_calls(parsed)
 
@@ -243,8 +290,8 @@ class SSETransformer:
                 for idx in finish_indices:
                     if self.buffer.calls[idx].name is not None:
                         logger.debug(
-                            "Finish reason %r for choice %d: "
-                            "marking tool call %d finished",
+                            "Finish reason {} for choice {}: "
+                            "marking tool call {} finished",
                             finish_reason,
                             choice_index,
                             idx,
@@ -253,7 +300,7 @@ class SSETransformer:
 
         if tool_call_deltas:
             logger.debug(
-                "SSE chunk has %d tool_call deltas",
+                "SSE chunk has {} tool_call deltas",
                 len(tool_call_deltas),
             )
             for choice in choices:
@@ -268,7 +315,7 @@ class SSETransformer:
 
                 if buffered_events:
                     logger.debug(
-                        "Emitting %d buffered tool call events for choice %d",
+                        "Emitting {} buffered tool call events for choice {}",
                         len(buffered_events),
                         choice_index,
                     )
@@ -294,7 +341,7 @@ class SSETransformer:
         flush_events = self.buffer.flush()
         if flush_events:
             logger.info(
-                "Flushing %d remaining tool call(s) on stream end",
+                "Flushing {} remaining tool call(s) on stream end",
                 len(flush_events),
             )
             for tc_delta in flush_events:
@@ -321,3 +368,4 @@ class SSETransformer:
         """Reset the transformer for a new request."""
         self.buffer.reset()
         self._done = False
+        self._line_buffer = []

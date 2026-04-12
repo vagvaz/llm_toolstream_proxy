@@ -8,7 +8,7 @@ from aiohttp import web
 from loguru import logger
 
 from . import config
-from .proxy import handle_health, handle_proxy, on_cleanup, on_startup
+from .proxy import handle_health, handle_metrics, handle_proxy, on_cleanup, on_startup
 
 
 def setup_logging() -> None:
@@ -60,6 +60,7 @@ def create_app() -> web.Application:
     app.on_cleanup.append(on_cleanup)
 
     app.router.add_get("/health", handle_health)
+    app.router.add_get("/metrics", handle_metrics)
     app.router.add_route("*", "/v1/{path:.*}", handle_proxy)
     app.router.add_route("*", "/{path:.*}", handle_proxy)
 
@@ -77,6 +78,7 @@ def main() -> None:
     Send-Q buffers that stall the machine. Use this entry point directly.
     """
     setup_logging()
+    config.validate_config()
 
     # Try to use uvloop for better async performance
     try:
