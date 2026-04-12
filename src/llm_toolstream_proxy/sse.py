@@ -17,7 +17,6 @@ are buffered until their metadata is complete.
 from __future__ import annotations
 
 import json
-from copy import deepcopy
 from typing import Any
 
 from loguru import logger
@@ -67,27 +66,47 @@ def encode_sse_done() -> str:
 
 def _extract_tool_calls(
     chunk: dict[str, Any],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Extract tool_calls from a streaming chunk and return a cleaned chunk
     without tool_calls.
 
     Returns:
-        (tool_call_deltas, chunk_without_tool_calls)
-        The chunk_without_tool_calls has tool_calls removed from all choices'
-        deltas, but preserves all other fields (role, content, reasoning, etc.)
+        (tool_call_deltas, chunk_without_tool_calls or None)
+        chunk_without_tool_calls is None if the chunk had no non-tool delta
+        fields worth emitting (i.e. the delta only contained tool_calls).
+        The chunk has tool_calls removed from all choices' deltas, but
+        preserves all other fields (role, content, reasoning, etc.).
     """
-    cleaned = deepcopy(chunk)
     tool_call_deltas: list[dict[str, Any]] = []
+    has_tool_calls = False
 
-    choices = cleaned.get("choices", [])
+    choices = chunk.get("choices", [])
     for choice in choices:
         delta = choice.get("delta", {})
         if delta and "tool_calls" in delta:
+            has_tool_calls = True
             tcs = delta.pop("tool_calls")
             if tcs:
                 tool_call_deltas.extend(tcs)
 
-    return tool_call_deltas, cleaned
+    if not has_tool_calls:
+        return [], None
+
+    # Check if the cleaned chunk has any non-tool content worth emitting
+    has_content = False
+    for choice in choices:
+        delta = choice.get("delta", {})
+        if delta:
+            remaining = {k: v for k, v in delta.items() if k != "tool_calls"}
+            if any(v is not None and v != "" and v != [] for v in remaining.values()):
+                has_content = True
+                break
+
+    # If no non-tool content, don't emit the cleaned chunk
+    if not has_content:
+        return tool_call_deltas, None
+
+    return tool_call_deltas, chunk
 
 
 def _inject_tool_call_events(
@@ -103,24 +122,20 @@ def _inject_tool_call_events(
     """
     events: list[dict[str, Any]] = []
     for tc_delta in tool_call_deltas:
-        new_chunk = deepcopy(chunk)
-        choices = new_chunk.get("choices", [])
-        if not choices:
-            new_chunk["choices"] = [
+        # Construct a minimal chunk with just the tool call delta
+        new_chunk: dict[str, Any] = {
+            "id": chunk.get("id", "chatcmpl-tool-buffer"),
+            "object": chunk.get("object", "chat.completion.chunk"),
+            "created": chunk.get("created", 0),
+            "model": chunk.get("model", ""),
+            "choices": [
                 {
                     "index": choice_index,
                     "delta": {"tool_calls": [tc_delta]},
                     "finish_reason": None,
                 }
-            ]
-        else:
-            for ch in choices:
-                if ch.get("index") == choice_index or len(choices) == 1:
-                    ch["delta"] = ch.get("delta", {})
-                    ch["delta"]["tool_calls"] = [tc_delta]
-                    if "finish_reason" not in ch:
-                        ch["finish_reason"] = None
-                    break
+            ],
+        }
         events.append(new_chunk)
     return events
 
@@ -177,19 +192,48 @@ class SSETransformer:
             logger.info("SSE stream ended, flushing remaining buffered tool calls")
             return self._flush_and_done()
 
-        tool_call_deltas, cleaned = _extract_tool_calls(parsed)
-        output_lines: list[str] = []
-
-        non_empty_delta = False
+        # Fast path: if the chunk has no tool_calls, pass through as-is
+        # without re-encoding. This avoids JSON parse → deepcopy → re-encode
+        # for the common case of content-only chunks.
+        has_tool_calls = False
         choices = parsed.get("choices", [])
         for ch in choices:
             delta = ch.get("delta", {})
-            if delta:
-                remaining = {k: v for k, v in delta.items() if k != "tool_calls"}
-                if any(
-                    v is not None and v != "" and v != [] for k, v in remaining.items()
-                ):
-                    non_empty_delta = True
+            if delta and "tool_calls" in delta:
+                has_tool_calls = True
+                break
+
+        if not has_tool_calls:
+            # Check for finish_reason to mark tool calls as finished
+            for ch in choices:
+                finish_reason = ch.get("finish_reason")
+                if finish_reason == "tool_calls" or finish_reason == "stop":
+                    choice_index = ch.get("index", 0)
+                    finish_indices = list(self.buffer.calls.keys())
+                    for idx in finish_indices:
+                        if self.buffer.calls[idx].name is not None:
+                            logger.debug(
+                                "Finish reason %r for choice %d: "
+                                "marking tool call %d finished",
+                                finish_reason,
+                                choice_index,
+                                idx,
+                            )
+                            self.buffer.finish_call(idx)
+
+            # Pass through the original raw line without re-encoding
+            stripped = raw_line.strip()
+            if stripped and stripped.startswith("data:"):
+                return [
+                    raw_line
+                    if raw_line.endswith("\n\n")
+                    else raw_line.rstrip("\n") + "\n\n"
+                ]
+            return [raw_line]
+
+        tool_call_deltas, cleaned = _extract_tool_calls(parsed)
+
+        output_lines: list[str] = []
 
         for ch in choices:
             finish_reason = ch.get("finish_reason")
@@ -209,9 +253,8 @@ class SSETransformer:
 
         if tool_call_deltas:
             logger.debug(
-                "SSE chunk has %d tool_call deltas, non_empty_delta=%s",
+                "SSE chunk has %d tool_call deltas",
                 len(tool_call_deltas),
-                non_empty_delta,
             )
             for choice in choices:
                 choice_index = choice.get("index", 0)
@@ -219,7 +262,8 @@ class SSETransformer:
                 for tc_delta in tool_call_deltas:
                     buffered_events.extend(self.buffer.process_delta(tc_delta))
 
-                if non_empty_delta:
+                # Emit the cleaned chunk (non-tool content) if it has content
+                if cleaned is not None:
                     output_lines.append(encode_sse_event(cleaned))
 
                 if buffered_events:
@@ -232,8 +276,6 @@ class SSETransformer:
                         parsed, choice_index, buffered_events
                     ):
                         output_lines.append(encode_sse_event(event_chunk))
-        else:
-            output_lines.append(encode_sse_event(parsed))
 
         return output_lines
 
@@ -255,23 +297,21 @@ class SSETransformer:
                 "Flushing %d remaining tool call(s) on stream end",
                 len(flush_events),
             )
-            base_chunk: dict[str, Any] = {
-                "id": "chatcmpl-tool-buffer",
-                "object": "chat.completion.chunk",
-                "created": 0,
-                "model": "",
-                "choices": [{"index": 0, "delta": {}, "finish_reason": None}],
-            }
             for tc_delta in flush_events:
                 idx = tc_delta.pop("index", 0)
-                chunk = deepcopy(base_chunk)
-                chunk["choices"] = [
-                    {
-                        "index": idx,
-                        "delta": {"tool_calls": [tc_delta]},
-                        "finish_reason": None,
-                    }
-                ]
+                chunk: dict[str, Any] = {
+                    "id": "chatcmpl-tool-buffer",
+                    "object": "chat.completion.chunk",
+                    "created": 0,
+                    "model": "",
+                    "choices": [
+                        {
+                            "index": idx,
+                            "delta": {"tool_calls": [tc_delta]},
+                            "finish_reason": None,
+                        }
+                    ],
+                }
                 output_lines.append(encode_sse_event(chunk))
 
         output_lines.append(encode_sse_done())

@@ -9,18 +9,13 @@ Streaming requests with ``stream: true`` are intercepted: the SSE response
 is parsed line-by-line, tool_call deltas are buffered and reassembled, and
 the cleaned SSE stream is returned to opencode.
 
-Resource management (prevents the 85k+ Send-Q stall):
-    - Streaming requests use ``Connection: close`` so the upstream closes
-      the TCP connection after each stream. This prevents stale connections
-      from accumulating in the pool with unacked data in their Send-Q.
-    - ``force_close=True`` on the TCPConnector ensures connections are never
-      reused — each request gets a fresh connection. The cost is one extra
-      TCP handshake per request, which is negligible for low-concurrency proxies.
+Resource management:
     - ``STREAM_MAX_DURATION`` caps total stream time even if data keeps trickling
       in (each chunk resets the sock_read timer, so sock_read alone is insufficient).
     - ``KEEPALIVE_TIMEOUT=30s`` closes idle pooled connections quickly.
     - Client disconnections are detected via ``request.transport.is_closing()``
       and abort the upstream stream immediately.
+    - ``STREAM_TIMEOUT=120s`` aborts if upstream stops sending data.
 """
 
 from __future__ import annotations
@@ -194,10 +189,6 @@ async def _handle_streaming(
     TCP connection is closed after the stream ends. This prevents stale
     connections from accumulating with unacked data in their Send-Q.
     """
-    # Force the upstream to close the connection after the stream.
-    # This is critical: without it, connections with 85k+ Send-Q accumulate
-    # because the kernel keeps retransmitting data the upstream never acked.
-    headers["Connection"] = "close"
     headers["Accept"] = "text/event-stream"
     headers["Cache-Control"] = "no-cache"
 
@@ -359,21 +350,14 @@ async def _handle_non_streaming(
 async def on_startup(app: web.Application) -> None:
     """Create a shared aiohttp.ClientSession for all upstream requests.
 
-    Uses ``force_close=True`` to prevent connection reuse. Each request
-    gets a fresh TCP connection that is closed after the response. This
-    eliminates stale connections with unacked data (the 85k+ Send-Q issue).
-
-    The cost is one extra TCP handshake per request, which is negligible
-    for a proxy handling a small number of concurrent sessions.
+    Uses connection pooling with keepalive for efficiency. Idle connections
+    are closed after KEEPALIVE_TIMEOUT seconds.
     """
     connector = aiohttp.TCPConnector(
         limit=config.MAX_UPSTREAM_CONNECTIONS,
         ttl_dns_cache=300,
         enable_cleanup_closed=True,
         keepalive_timeout=config.KEEPALIVE_TIMEOUT,
-        # force_close=True: never reuse connections. Prevents stale connections
-        # from accumulating with unacked data in their Send-Q.
-        force_close=True,
     )
     timeout = aiohttp.ClientTimeout(
         connect=config.CONNECT_TIMEOUT,
@@ -384,8 +368,7 @@ async def on_startup(app: web.Application) -> None:
     )
     app["client_session"] = session
     logger.info(
-        "Created shared ClientSession (limit=%d, connect_timeout=%ds, "
-        "keepalive=%ds, force_close=True)",
+        "Created shared ClientSession (limit=%d, connect_timeout=%ds, keepalive=%ds)",
         config.MAX_UPSTREAM_CONNECTIONS,
         config.CONNECT_TIMEOUT,
         config.KEEPALIVE_TIMEOUT,

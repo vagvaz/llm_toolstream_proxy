@@ -281,79 +281,60 @@ The proxy detects `finish_reason: "tool_calls"` or `"stop"` in any chunk and mar
 
 ## Resource Management & Reliability
 
-### Why the proxy stalled the host machine (85k+ Send-Q)
+### The 85k+ Send-Q issue
 
 The proxy runs on a separate machine from litellm. Observed symptom: `ss -tn`
-showed **85k+ Send-Q** on connections to the upstream (litellm). Send-Q is the
-kernel's TCP send buffer — data the proxy has written but litellm hasn't
-acknowledged. When these buffers accumulate across many stuck connections, the
-kernel's network stack spends all its CPU on retransmissions and eventually
-can't accept new connections (including SSH).
+showed **85k+ Send-Q** on connections to the upstream (litellm). The Send-Q
+builds up during streaming responses and eventually drains — responses flow
+back to the client most of the time, but the accumulation causes latency and
+can make the machine temporarily unresponsive.
 
-**Root cause**: connections to litellm that never close properly. The proxy
-opened a TCP connection, sent the request body, and then waited for the SSE
-response. If litellm stopped responding (or the response trickled in slowly),
-the connection stayed open with unacked data in the Send-Q. With no hard
-timeout on total stream duration, these zombie connections accumulated
-indefinitely.
+**Root cause**: the proxy's per-chunk processing overhead (JSON parse →
+tool_call extraction → buffer processing → JSON re-encode) is slower than
+the upstream's send rate. When litellm sends SSE chunks faster than the
+proxy can process and forward them, data accumulates in the kernel's TCP
+send buffer. This is a throughput bottleneck, not a connection leak.
 
-Specific issues in the original code:
+The proxy mitigates this with:
 
-1. **`total=None` on streaming requests** — no maximum duration. A stream could
-   run forever if data trickled in slowly (each chunk resets the `sock_read`
-   timer). Zombie streams with 85k+ Send-Q accumulated.
-2. **Connection pooling with `force_close=False`** — after a long streaming
-   request, the connection could be in a bad state. Reusing it meant the next
-   request also got stuck.
-3. **No `Connection: close` on streaming requests** — the upstream didn't know
-   to close the connection after the stream ended, so stale connections
-   lingered.
-4. **`STREAM_TIMEOUT=300`** (5 min sock-read) — way too long. If litellm
-   stopped sending data, the proxy waited 5 minutes per chunk before giving up.
-5. **No client disconnect detection** — if opencode disconnected mid-stream,
-   the proxy kept reading from litellm into the void, holding the upstream
-   connection open.
+1. **Fast-path passthrough** — chunks without tool_calls are forwarded as-is
+   without JSON parse/re-encode, eliminating the most common per-chunk overhead.
+2. **No `deepcopy`** — tool call extraction and injection use manual dict
+   construction instead of `deepcopy`, which is 10-50x faster for our
+   simple dict structures.
+3. **`STREAM_MAX_DURATION=600s`** — hard ceiling on total stream time. Even
+   if data trickles in (resetting sock_read), the stream is killed after
+   10 minutes.
+4. **`STREAM_TIMEOUT=120s`** — if upstream stops sending for 2 minutes, the
+   stream is aborted.
+5. **Client disconnect detection** — `_wait_for_disconnect()` polls
+   `request.transport.is_closing()` and aborts the upstream stream immediately
+   when the client goes away.
+6. **`CONNECT_TIMEOUT=15s`** — don't hang on unreachable upstreams.
+7. **Buffer size limits** — `MAX_ARGUMENTS_SIZE=1MB` and `MAX_TOOL_CALLS=32`
+   prevent unbounded memory growth.
+
+### Gunicorn warning
+
+**Do not use gunicorn with this proxy.** Gunicorn's `--timeout` SIGKILLs
+workers mid-stream, leaving orphaned TCP connections. For streaming SSE
+responses that take 2-5 minutes, this is catastrophic. Use `python -m
+llm_toolstream_proxy.main` directly (with optional uvloop for performance).
 
 ### Fixes applied
 
 | Problem | Fix |
 |---------|-----|
+| Per-chunk processing slower than upstream send rate | Fast-path passthrough for non-tool-call chunks (no JSON parse/re-encode). Manual dict construction instead of `deepcopy`. |
 | Zombie streams with no hard timeout | `STREAM_MAX_DURATION=600s` caps total stream time via `asyncio.wait_for`. Even if data trickles in (resetting sock_read), the stream is killed after 10 minutes. |
-| Stale connections with unacked Send-Q | `force_close=True` on TCPConnector — every request gets a fresh connection that is closed after use. No connection reuse means no stale connections. |
-| Upstream not closing connections | `Connection: close` header on streaming requests tells litellm to close the connection after the response. |
 | No client disconnect detection | `_wait_for_disconnect()` polls `request.transport.is_closing()` and sets a cancel event that aborts the upstream stream immediately. |
 | sock_read timeout too long | `STREAM_TIMEOUT` reduced from 300s to 120s. If upstream stops sending for 2 minutes, the stream is aborted. |
 | No connect timeout | `CONNECT_TIMEOUT=15s` prevents hanging on unreachable upstreams. |
 | No request timeout for non-streaming | `REQUEST_TIMEOUT=300s` caps total time for non-streaming requests. |
 | Unbounded argument accumulation | `MAX_ARGUMENTS_SIZE=1MB` truncates further deltas when exceeded. |
 | Unbounded tool call count | `MAX_TOOL_CALLS=32` rejects new tool calls beyond the limit. |
-| No worker recycling | `--max-requests 10000 --max-requests-jitter 1000` recycles gunicorn workers to prevent memory/FD leaks. |
 | No graceful shutdown | `on_cleanup` hook closes the shared `ClientSession` properly. |
 | Non-streaming upstream errors crash the handler | `_handle_non_streaming` now catches `ClientError` (502) and `TimeoutError` (504). |
-
-### Why gunicorn causes the 85k+ Send-Q stall
-
-**Gunicorn's worker timeout kills workers mid-stream.** The `--timeout` flag
-tells gunicorn to SIGKILL any worker that hasn't completed a request within N
-seconds. For streaming SSE responses that routinely take 2-5 minutes, this
-means gunicorn kills workers while they're still reading from litellm and
-writing to opencode.
-
-When a worker is killed mid-stream:
-1. The worker process is SIGKILL'd — no cleanup, no graceful shutdown
-2. All its TCP connections are left half-open with data in their Send-Q
-3. The kernel keeps retransmitting that data (85k+ per connection)
-4. These orphaned connections accumulate until the network stack chokes
-5. SSH can't establish new connections because the kernel is busy retransmitting
-
-This was confirmed by the user: the same proxy code works fine when run
-directly via `python -m llm_toolstream_proxy.main` (no gunicorn), but stalls
-when deployed via gunicorn. Another aiohttp-based proxy had the same issue
-with gunicorn but not with direct deployment.
-
-**Solution: don't use gunicorn.** The proxy now runs directly via
-`web.run_app()` with optional uvloop for performance. Gunicorn's process
-management model is designed for sync WSGI workers, not long-lived SSE streams.
 
 ### Recommended OS-level TCP tuning
 
