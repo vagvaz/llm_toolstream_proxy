@@ -60,45 +60,105 @@ apply_tcp_tuning() {
 # =============================================================================
 # TCP tuning for llm-toolstream-proxy
 # Applied by /opt/llm-toolstream-proxy/setup_server.sh
+#
+# WHY THESE SETTINGS MATTER:
+# The proxy sits between opencode and litellm handling long-lived SSE streams
+# (2-5 minutes). The 85k+ Send-Q issue occurs because the proxy's per-chunk
+# processing is slower than litellm's send rate, causing data to accumulate
+# in the kernel's TCP send buffer. These tunables help in three ways:
+#
+#   1. Detect dead connections faster  → free up resources sooner
+#   2. Reduce retransmit wait times    → stuck connections fail fast
+#   3. Increase socket buffers         → absorb bursts without dropping
 # =============================================================================
 
-# --- Connection lifecycle ---
-# Detect dead connections faster (default: 7200s = 2h)
-# Helps the proxy close connections to a dead upstream sooner
+# --- Connection lifecycle: detect dead connections faster ---
+#
+# Problem: Default TCP keepalive waits 2 HOURS (7200s) before detecting a dead
+# connection. If litellm crashes mid-stream, the proxy holds 100 connections
+# for 2 hours waiting for the kernel to declare them dead.
+#
+# Fix: Send keepalive probes after 60s of inactivity, every 10s, give up after 6.
+# This detects a dead upstream in ~70s instead of 2h, freeing connections.
+#
+# Default: net.ipv4.tcp_keepalive_time=7200, tcp_keepalive_intvl=75,
+#          tcp_keepalive_probes=9  (total ~2h before giving up)
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
 net.ipv4.tcp_keepalive_probes = 6
 
-# --- Retransmission ---
-# Reduce TCP retry timeouts (default: 15 min total)
-# Prevents stuck connections from consuming kernel resources
+# --- Retransmission: fail fast on stuck connections ---
+#
+# Problem: TCP retries a failed packet up to 15 times with exponential backoff.
+# In some network conditions (flaky WAN links to cloud litellm), a single packet
+# loss can cause 15 retransmit attempts over ~13 minutes, holding the socket.
+#
+# Fix: tcp_retries1=3 (abort after ~6s on local network issues)
+#      tcp_retries2=5 (abort after ~100s on path problems, vs default ~15min)
+#
+# Default: net.ipv4.tcp_retries1=3 (already optimal)
+#          net.ipv4.tcp_retries2=15 (~13 minutes of retries)
 net.ipv4.tcp_retries1 = 3
 net.ipv4.tcp_retries2 = 5
 
-# --- Socket reuse ---
-# Allow reuse of sockets in TIME_WAIT (needed for high-throughput proxy)
+# --- Socket reuse: prevent port exhaustion under load ---
+#
+# Problem: When proxy closes a connection, it enters TIME_WAIT state for 60s.
+# Under heavy load (100 concurrent streams, each lasting minutes), new connections
+# may be delayed waiting for available ports.
+#
+# Fix: Allow reuse of sockets in TIME_WAIT for new connections immediately.
+# This is safe for a proxy because we initiate connections (client role).
+#
+# Default: net.ipv4.tcp_tw_reuse=0
 net.ipv4.tcp_tw_reuse = 1
 
-# --- Buffer sizes ---
-# Increase max kernel buffer for high-throughput streaming
-# (these are per-socket maximums; the proxy also has application limits)
+# --- Buffer sizes: absorb Send-Q bursts ---
+#
+# Problem: When proxy processes chunks slower than litellm sends, data accumulates
+# in the kernel's send buffer (proxy→client) and receive buffer (proxy from litellm).
+# Default buffer caps of ~128KB are too small for 2-5 minute streams at high throughput.
+#
+# Fix: Raise per-socket buffer caps to 16MB. The proxy also enforces
+# application-level limits (MAX_ARGUMENTS_SIZE=1MB, MAX_CONCURRENT_STREAMS=50).
+# These are a safety net; aiohttp's flow control (response.drain()) handles the rest.
+#
+# tcp_rmem / tcp_wmem: (min, default, max) per socket
+# Default: net.core.rmem_max=131071, net.ipv4.tcp_rmem="4096 87380 6291456"
 net.core.rmem_max = 16777216
 net.core.wmem_max = 16777216
 net.ipv4.tcp_rmem = 4096 87380 16777216
 net.ipv4.tcp_wmem = 4096 65536 16777216
 
-# --- Connection tracking ---
-# Increase connection tracking table size if running a firewall
-# (adjust if you see 'nf_conntrack: table full' in dmesg)
+# --- Connection tracking: prevent table overflow ---
+#
+# Only needed if the proxy machine also runs a firewall (nftables/iptables).
+# If you see "nf_conntrack: table full" in dmesg, increase these.
+# The proxy itself does NOT need connection tracking.
+#
+# Default: net.netfilter.nf_conntrack_max=262144 (can fill fast with 100 conns)
 net.netfilter.nf_conntrack_max = 1048576
 net.nf_conntrack_max = 1048576
 
-# --- File descriptors ---
-# Raise per-process FD limit (proxy may handle many concurrent connections)
+# --- File descriptors: support many concurrent connections ---
+#
+# Problem: Each upstream connection uses 1 FD. With 100 concurrent upstream
+# connections + server sockets + logs, default fs.file-max=2097152 is fine but
+# per-process limit may be hit. systemd's default is 512-1024.
+#
+# Fix: Raise system-wide file-max and let systemd set LimitNOFILE=1048576
+# in the service unit (see llm-toolstream-proxy.service).
+#
+# Default: fs.file-max=2097152 (already generous)
 fs.file-max = 2097152
 
-# --- TCP congestion ---
-# Use CUBIC (good for high-BDP networks like proxy-to-upstream)
+# --- TCP congestion: better throughput on high-BDP links ---
+#
+# The proxy→litellm path may traverse WAN links with high bandwidth-delay product.
+# CUBIC (default on most Linux) is good for this; this just makes it explicit.
+# Leave as cubic unless you have measured BBR performs better on your network.
+#
+# Default: net.ipv4.tcp_congestion_control=cubic (set by kernel)
 net.ipv4.tcp_congestion_control = cubic
 SYSCTL_EOF
 

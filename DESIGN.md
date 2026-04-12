@@ -338,20 +338,35 @@ llm_toolstream_proxy.main` directly (with optional uvloop for performance).
 
 ### Recommended OS-level TCP tuning
 
-On the proxy machine, set these in `/etc/sysctl.d/99-llm-proxy.conf`:
+On the proxy machine, run `sudo ./setup_server.sh --tuning-only` or set these
+manually in `/etc/sysctl.d/99-llm-proxy.conf`:
 
 ```ini
-# Detect dead connections faster (default: 7200s)
+# TCP keepalive: detect dead upstream in ~70s instead of 2h
 net.ipv4.tcp_keepalive_time = 60
 net.ipv4.tcp_keepalive_intvl = 10
 net.ipv4.tcp_keepalive_probes = 6
 
-# Reduce TCP retry timeout (default: 15 min)
+# Retransmit: fail fast instead of 13-min retry loops
 net.ipv4.tcp_retries1 = 3
 net.ipv4.tcp_retries2 = 5
 
-# Allow reuse of sockets in TIME_WAIT state
+# Socket reuse: prevent port exhaustion under load
 net.ipv4.tcp_tw_reuse = 1
+
+# Larger socket buffers: absorb Send-Q bursts (16MB, proxy also enforces
+# application-level limits)
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.ipv4.tcp_rmem = 4096 87380 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+
+# Connection tracking: prevent table overflow if running a firewall
+net.netfilter.nf_conntrack_max = 1048576
+net.nf_conntrack_max = 1048576
+
+# File descriptors: support many concurrent connections
+fs.file-max = 2097152
 ```
 
 ## Request Flow Diagrams

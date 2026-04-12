@@ -49,6 +49,10 @@ MAX_TOOL_CALLS: int = int(os.getenv("PROXY_MAX_TOOL_CALLS", "32"))
 # Maximum concurrent streaming requests. When exceeded, new requests get 503.
 # Prevents the proxy from being overwhelmed when the upstream is slow.
 MAX_CONCURRENT_STREAMS: int = int(os.getenv("PROXY_MAX_CONCURRENT_STREAMS", "50"))
+# Maximum request body size (bytes). Requests exceeding this size get 413.
+MAX_REQUEST_BODY_SIZE: int = int(
+    os.getenv("PROXY_MAX_REQUEST_BODY_SIZE", str(1024 * 1024))
+)  # 1MB
 
 # Proxy settings for validation
 PROXY_STREAM_TIMEOUT: float = STREAM_TIMEOUT
@@ -58,6 +62,7 @@ PROXY_REQUEST_TIMEOUT: float = REQUEST_TIMEOUT
 PROXY_KEEPALIVE_TIMEOUT: float = KEEPALIVE_TIMEOUT
 PROXY_MAX_UPSTREAM_CONNECTIONS: int = MAX_UPSTREAM_CONNECTIONS
 PROXY_MAX_ARGS_SIZE: int = MAX_ARGUMENTS_SIZE
+PROXY_MAX_REQUEST_BODY_SIZE: int = MAX_REQUEST_BODY_SIZE
 
 
 def validate_config() -> None:
@@ -105,6 +110,11 @@ def validate_config() -> None:
     if MAX_CONCURRENT_STREAMS <= 0:
         errors.append(
             f"PROXY_MAX_CONCURRENT_STREAMS must be > 0, got: {MAX_CONCURRENT_STREAMS}"
+        )
+    if PROXY_MAX_REQUEST_BODY_SIZE <= 0:
+        errors.append(
+            f"PROXY_MAX_REQUEST_BODY_SIZE must be > 0, "
+            f"got: {PROXY_MAX_REQUEST_BODY_SIZE}"
         )
 
     # Warn if STREAM_MAX_DURATION is not greater than STREAM_TIMEOUT

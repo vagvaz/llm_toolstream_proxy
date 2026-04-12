@@ -84,6 +84,18 @@ async def _is_streaming_request(body: dict[str, Any]) -> bool:
 async def _read_request_body(request: web.Request) -> dict[str, Any]:
     """Read and parse the JSON request body."""
     raw = await request.read()
+    if len(raw) > config.MAX_REQUEST_BODY_SIZE:
+        raise web.HTTPRequestEntityTooLarge(
+            max_size=config.MAX_REQUEST_BODY_SIZE,
+            actual_size=len(raw),
+            content_type="application/json",
+            text=json.dumps(
+                {
+                    "error": "request body too large",
+                    "detail": f"max body size is {config.MAX_REQUEST_BODY_SIZE} bytes",
+                }
+            ),
+        )
     if not raw:
         return {}
     try:
