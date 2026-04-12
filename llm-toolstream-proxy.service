@@ -1,0 +1,29 @@
+[Unit]
+Description=llm-toolstream-proxy (SSE reverse proxy for LLM tool calls)
+Documentation=https://github.com/anomalyco/qwen_jsontool
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/llm-toolstream-proxy
+EnvironmentFile=-/opt/llm-toolstream-proxy/.env
+ExecStart=/opt/llm-toolstream-proxy/start.sh
+Restart=on-failure
+RestartSec=5s
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/llm-toolstream-proxy /var/log/llm-proxy
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6
+LimitNOFILE=1048576
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=llm-proxy
+# Graceful shutdown: give active streams up to 60s to finish
+TimeoutStopSec=60s
+
+[Install]
+WantedBy=multi-user.target

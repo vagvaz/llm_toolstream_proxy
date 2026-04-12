@@ -249,12 +249,28 @@ async def _handle_streaming(
 
     Applies backpressure via ``response.drain()`` to prevent Send-Q
     accumulation when the downstream client is slow. Limits concurrent
-    streams via a semaphore; returns 503 when the limit is exceeded.
+    streams via a semaphore; returns 503 when the limit is exceeded or
+    the proxy is shutting down.
     """
     from .metrics import collector
 
+    app = request.app
+
+    # Reject new requests if the proxy is shutting down
+    shutdown_event: asyncio.Event = app["shutdown_event"]
+    if shutdown_event.is_set():
+        collector.record_error("proxy_shutting_down")
+        req_metrics.error = "proxy_shutting_down"
+        return web.Response(
+            status=503,
+            content_type="application/json",
+            text=json.dumps(
+                {"error": "proxy shutting down", "detail": "try again shortly"}
+            ),
+        )
+
     # Check concurrent stream limit
-    semaphore: asyncio.Semaphore = request.app["stream_semaphore"]
+    semaphore: asyncio.Semaphore = app["stream_semaphore"]
     if semaphore.locked():
         # All slots are taken — reject with 503
         logger.warning(
@@ -278,74 +294,88 @@ async def _handle_streaming(
         )
 
     async with semaphore:
-        headers["Accept"] = "text/event-stream"
-        headers["Cache-Control"] = "no-cache"
-
-        logger.info("[{}] Starting streaming proxy to {}", req_metrics.request_id, url)
-
-        response = web.StreamResponse(
-            status=200,
-            headers={
-                "Content-Type": "text/event-stream",
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-        )
-        await response.prepare(request)
-
-        # Event set when the downstream client disconnects
-        cancel_event = asyncio.Event()
-
-        # Monitor for client disconnection
-        disconnect_task = asyncio.create_task(
-            _wait_for_disconnect(request, cancel_event)
-        )
-
-        session: aiohttp.ClientSession = request.app["client_session"]
-
+        # Track active streams for graceful shutdown
+        app["active_streams"] = app["active_streams"] + 1
         try:
-            # Hard ceiling on total stream duration. sock_read resets on each
-            # chunk, so a slow trickle can keep a stream alive indefinitely.
-            # STREAM_MAX_DURATION kills the stream regardless.
-            stream_task = asyncio.ensure_future(
-                _stream_to_response(
-                    session,
-                    request,
-                    url,
-                    headers,
-                    body,
-                    cancel_event,
-                    response,
-                    req_metrics,
-                )
-            )
-            try:
-                await asyncio.wait_for(stream_task, timeout=config.STREAM_MAX_DURATION)
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[{}] Streaming request exceeded max duration ({}s), closing",
-                    req_metrics.request_id,
-                    config.STREAM_MAX_DURATION,
-                )
-                req_metrics.error = "stream_max_duration"
-                stream_task.cancel()
-        except (aiohttp.ClientError, asyncio.CancelledError):
-            logger.warning(
-                "[{}] Streaming proxy request failed (upstream error or cancellation)",
-                req_metrics.request_id,
-            )
-            if not req_metrics.error:
-                req_metrics.error = "upstream_error"
-        finally:
-            disconnect_task.cancel()
-            try:
-                await disconnect_task
-            except asyncio.CancelledError:
-                pass
+            headers["Accept"] = "text/event-stream"
+            headers["Cache-Control"] = "no-cache"
 
-        logger.info("[{}] Streaming proxy request completed", req_metrics.request_id)
-        await response.write_eof()
+            logger.info(
+                "[{}] Starting streaming proxy to {}", req_metrics.request_id, url
+            )
+
+            response = web.StreamResponse(
+                status=200,
+                headers={
+                    "Content-Type": "text/event-stream",
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+            await response.prepare(request)
+
+            # Event set when the downstream client disconnects
+            cancel_event = asyncio.Event()
+
+            # Monitor for client disconnection
+            disconnect_task = asyncio.create_task(
+                _wait_for_disconnect(request, cancel_event)
+            )
+
+            session: aiohttp.ClientSession = request.app["client_session"]
+
+            try:
+                # Hard ceiling on total stream duration. sock_read resets on each
+                # chunk, so a slow trickle can keep a stream alive indefinitely.
+                # STREAM_MAX_DURATION kills the stream regardless.
+                stream_task = asyncio.ensure_future(
+                    _stream_to_response(
+                        session,
+                        request,
+                        url,
+                        headers,
+                        body,
+                        cancel_event,
+                        response,
+                        req_metrics,
+                    )
+                )
+                try:
+                    await asyncio.wait_for(
+                        stream_task, timeout=config.STREAM_MAX_DURATION
+                    )
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "[{}] Streaming request exceeded max duration ({}s), closing",
+                        req_metrics.request_id,
+                        config.STREAM_MAX_DURATION,
+                    )
+                    req_metrics.error = "stream_max_duration"
+                    stream_task.cancel()
+            except (aiohttp.ClientError, asyncio.CancelledError):
+                logger.warning(
+                    "[{}] Streaming proxy request failed "
+                    "(upstream error or cancellation)",
+                    req_metrics.request_id,
+                )
+                if not req_metrics.error:
+                    req_metrics.error = "upstream_error"
+            finally:
+                disconnect_task.cancel()
+                try:
+                    await disconnect_task
+                except asyncio.CancelledError:
+                    pass
+
+            logger.info(
+                "[{}] Streaming proxy request completed", req_metrics.request_id
+            )
+            await response.write_eof()
+        finally:
+            # Decrement active streams counter — must happen even on exception
+            app["active_streams"] = app["active_streams"] - 1
+
         return response
 
 
@@ -482,6 +512,8 @@ async def on_startup(app: web.Application) -> None:
     )
     app["client_session"] = session
     app["stream_semaphore"] = asyncio.Semaphore(config.MAX_CONCURRENT_STREAMS)
+    app["shutdown_event"] = asyncio.Event()
+    app["active_streams"] = 0
     logger.info(
         "Created shared ClientSession (limit={}, connect_timeout={}s, keepalive={}s) "
         "max_concurrent_streams={}",
@@ -493,7 +525,36 @@ async def on_startup(app: web.Application) -> None:
 
 
 async def on_cleanup(app: web.Application) -> None:
-    """Close the shared ClientSession on shutdown."""
+    """Gracefully shut down the proxy.
+
+    1. Signal shutdown — reject new streaming requests with 503.
+    2. Wait up to 55s for active streams to drain (systemd sends SIGKILL
+       after TimeoutStopSec=60s; we leave 5s margin).
+    3. Close the shared ClientSession, cancelling any remaining streams.
+    """
+    logger.info("Shutdown initiated — signaling stop to new streams")
+    shutdown_event: asyncio.Event = app["shutdown_event"]
+    shutdown_event.set()
+
+    # Wait for active streams to drain
+    active = app["active_streams"]
+    if active > 0:
+        logger.info("Waiting for {} active stream(s) to finish...", active)
+        for _ in range(55):  # poll every second, up to 55s
+            await asyncio.sleep(1)
+            remaining = app["active_streams"]
+            if remaining == 0:
+                logger.info("All active streams finished")
+                break
+            logger.info("Still waiting — {} active stream(s) remaining", remaining)
+        else:
+            logger.warning(
+                "Timeout waiting for active streams — {} still running, forcing close",
+                app["active_streams"],
+            )
+    else:
+        logger.info("No active streams — shutting down immediately")
+
     session: aiohttp.ClientSession = app["client_session"]
     await session.close()
     logger.info("Closed shared ClientSession")
