@@ -12,7 +12,9 @@ dependencies = [
 [project.optional-dependencies]
 deploy = [
     "gunicorn>=23.0",
-    "aiohttp-gunicorn",
+]
+uvloop = [
+    "uvloop>=0.19",
 ]
 dev = [
     "pytest>=8.0",

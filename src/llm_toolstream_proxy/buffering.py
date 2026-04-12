@@ -144,9 +144,17 @@ class ToolCallBuffer:
             yield format_sse(event)
     """
 
-    def __init__(self, *, validate_json: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        validate_json: bool = True,
+        max_arguments_size: int = 1024 * 1024,
+        max_tool_calls: int = 32,
+    ) -> None:
         self.calls: dict[int, BufferedToolCall] = {}
         self.validate_json = validate_json
+        self.max_arguments_size = max_arguments_size
+        self.max_tool_calls = max_tool_calls
 
     def _get_or_create(self, index: int) -> BufferedToolCall:
         if index not in self.calls:
@@ -188,6 +196,15 @@ class ToolCallBuffer:
 
         call = self._get_or_create(index)
 
+        # Guard: reject new tool calls beyond the limit
+        if index not in self.calls and len(self.calls) >= self.max_tool_calls:
+            logger.warning(
+                "Rejecting tool call at index %d: exceeded max_tool_calls=%d",
+                index,
+                self.max_tool_calls,
+            )
+            return []
+
         if tc_id and not call.id:
             logger.debug("Tool call index %d: received id=%r", index, tc_id)
             call.id = tc_id
@@ -202,7 +219,20 @@ class ToolCallBuffer:
         call.type = raw_type or call.type
 
         if args:
-            call.arguments += args
+            if len(call.arguments) + len(args) > self.max_arguments_size:
+                logger.warning(
+                    "Tool call %r index %d: arguments exceed max size (%d bytes), "
+                    "truncating further deltas",
+                    call.name,
+                    index,
+                    self.max_arguments_size,
+                )
+                # Fill to max and stop accumulating
+                remaining = self.max_arguments_size - len(call.arguments)
+                if remaining > 0:
+                    call.arguments += args[:remaining]
+            else:
+                call.arguments += args
 
         events: list[dict[str, Any]] = []
 

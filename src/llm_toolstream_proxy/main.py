@@ -8,7 +8,7 @@ from aiohttp import web
 from loguru import logger
 
 from . import config
-from .proxy import handle_health, handle_proxy
+from .proxy import handle_health, handle_proxy, on_cleanup, on_startup
 
 
 def setup_logging() -> None:
@@ -52,8 +52,12 @@ def setup_logging() -> None:
 
 
 def create_app() -> web.Application:
-    """Create the aiohttp application with all routes."""
+    """Create the aiohttp application with all routes and lifecycle hooks."""
     app = web.Application()
+
+    # Lifecycle hooks for shared ClientSession
+    app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
 
     app.router.add_get("/health", handle_health)
     app.router.add_route("*", "/v1/{path:.*}", handle_proxy)
@@ -63,8 +67,25 @@ def create_app() -> web.Application:
 
 
 def main() -> None:
-    """Run the proxy server."""
+    """Run the proxy server.
+
+    Uses uvloop for better async performance if available.
+    Falls back to the default asyncio event loop if uvloop is not installed.
+
+    IMPORTANT: Do NOT deploy with gunicorn. Gunicorn's worker timeout model
+    kills workers mid-stream, leaving orphaned TCP connections with large
+    Send-Q buffers that stall the machine. Use this entry point directly.
+    """
     setup_logging()
+
+    # Try to use uvloop for better async performance
+    try:
+        import uvloop
+
+        uvloop.install()
+        logger.info("Using uvloop event loop")
+    except ImportError:
+        logger.info("uvloop not available, using default asyncio event loop")
 
     app = create_app()
     logger.info(

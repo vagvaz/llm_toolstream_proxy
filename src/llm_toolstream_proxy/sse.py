@@ -139,8 +139,18 @@ class SSETransformer:
             yield sse_line
     """
 
-    def __init__(self, *, validate_json: bool = True) -> None:
-        self.buffer = ToolCallBuffer(validate_json=validate_json)
+    def __init__(
+        self,
+        *,
+        validate_json: bool = True,
+        max_arguments_size: int = 1024 * 1024,
+        max_tool_calls: int = 32,
+    ) -> None:
+        self.buffer = ToolCallBuffer(
+            validate_json=validate_json,
+            max_arguments_size=max_arguments_size,
+            max_tool_calls=max_tool_calls,
+        )
         self._done = False
 
     def process_raw(self, raw_line: str) -> list[str]:

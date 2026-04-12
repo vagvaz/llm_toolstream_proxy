@@ -8,10 +8,24 @@ Non-streaming requests are forwarded transparently with no modification.
 Streaming requests with ``stream: true`` are intercepted: the SSE response
 is parsed line-by-line, tool_call deltas are buffered and reassembled, and
 the cleaned SSE stream is returned to opencode.
+
+Resource management (prevents the 85k+ Send-Q stall):
+    - Streaming requests use ``Connection: close`` so the upstream closes
+      the TCP connection after each stream. This prevents stale connections
+      from accumulating in the pool with unacked data in their Send-Q.
+    - ``force_close=True`` on the TCPConnector ensures connections are never
+      reused — each request gets a fresh connection. The cost is one extra
+      TCP handshake per request, which is negligible for low-concurrency proxies.
+    - ``STREAM_MAX_DURATION`` caps total stream time even if data keeps trickling
+      in (each chunk resets the sock_read timer, so sock_read alone is insufficient).
+    - ``KEEPALIVE_TIMEOUT=30s`` closes idle pooled connections quickly.
+    - Client disconnections are detected via ``request.transport.is_closing()``
+      and abort the upstream stream immediately.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any, AsyncIterator
 
@@ -80,34 +94,67 @@ async def _stream_response(
     *,
     buffer_tool_calls: bool,
     validate_json: bool,
+    cancel_event: asyncio.Event,
 ) -> AsyncIterator[bytes]:
-    """Stream the response from litellm, applying tool call buffering if needed."""
+    """Stream the response from litellm, applying tool call buffering if needed.
+
+    Args:
+        session: Shared aiohttp ClientSession for connection reuse.
+        cancel_event: Set when the downstream client disconnects, causing
+            the upstream request to be cancelled immediately.
+    """
     transformer = (
-        SSETransformer(validate_json=validate_json) if buffer_tool_calls else None
+        SSETransformer(
+            validate_json=validate_json,
+            max_arguments_size=config.MAX_ARGUMENTS_SIZE,
+            max_tool_calls=config.MAX_TOOL_CALLS,
+        )
+        if buffer_tool_calls
+        else None
     )
 
-    async with session.request(
-        method=method,
-        url=url,
-        headers=headers,
-        data=body,
-        timeout=aiohttp.ClientTimeout(sock_read=config.STREAM_TIMEOUT),
-    ) as resp:
-        async for line in resp.content:
-            decoded = line.decode("utf-8", errors="replace")
+    timeout = aiohttp.ClientTimeout(
+        total=None,  # no total limit — controlled by STREAM_MAX_DURATION wrapper
+        connect=config.CONNECT_TIMEOUT,
+        sock_read=config.STREAM_TIMEOUT,
+    )
+
+    try:
+        async with session.request(
+            method=method,
+            url=url,
+            headers=headers,
+            data=body,
+            timeout=timeout,
+        ) as resp:
+            async for line in resp.content:
+                # Check if the downstream client has disconnected
+                if cancel_event.is_set():
+                    logger.info("Client disconnected, aborting upstream stream")
+                    return
+
+                decoded = line.decode("utf-8", errors="replace")
+
+                if transformer is not None:
+                    for output_line in transformer.process_raw(decoded):
+                        yield output_line.encode("utf-8")
+                else:
+                    yield line
 
             if transformer is not None:
-                for output_line in transformer.process_raw(decoded):
+                for output_line in transformer.flush():
+                    if cancel_event.is_set():
+                        return
                     yield output_line.encode("utf-8")
-            else:
-                yield line
+    except asyncio.CancelledError:
+        logger.info("Upstream stream cancelled (client disconnect or shutdown)")
+        raise
+    except aiohttp.ClientError as exc:
+        logger.error("Upstream connection error: %s", exc)
+        raise
 
-        if transformer is not None:
-            for output_line in transformer.flush():
-                yield output_line.encode("utf-8")
 
-
-async def handle_proxy(request: web.Request) -> web.StreamResponse:
+async def handle_proxy(request: web.Request) -> web.StreamResponse | web.Response:
     """Main proxy handler for all requests."""
     path = request.path
     method = request.method
@@ -141,7 +188,16 @@ async def _handle_streaming(
     headers: dict[str, str],
     body: bytes,
 ) -> web.StreamResponse:
-    """Handle a streaming request with tool call buffering."""
+    """Handle a streaming request with tool call buffering.
+
+    Streaming requests use ``Connection: close`` to ensure the upstream
+    TCP connection is closed after the stream ends. This prevents stale
+    connections from accumulating with unacked data in their Send-Q.
+    """
+    # Force the upstream to close the connection after the stream.
+    # This is critical: without it, connections with 85k+ Send-Q accumulate
+    # because the kernel keeps retransmitting data the upstream never acked.
+    headers["Connection"] = "close"
     headers["Accept"] = "text/event-stream"
     headers["Cache-Control"] = "no-cache"
 
@@ -158,21 +214,93 @@ async def _handle_streaming(
     )
     await response.prepare(request)
 
-    async with aiohttp.ClientSession() as session:
-        async for chunk in _stream_response(
-            session,
-            method=request.method,
-            url=url,
-            headers=headers,
-            body=body,
-            buffer_tool_calls=True,
-            validate_json=config.VALIDATE_JSON_ARGS,
-        ):
-            await response.write(chunk)
+    # Event set when the downstream client disconnects
+    cancel_event = asyncio.Event()
+
+    # Monitor for client disconnection
+    disconnect_task = asyncio.create_task(_wait_for_disconnect(request, cancel_event))
+
+    session: aiohttp.ClientSession = request.app["client_session"]
+
+    try:
+        # Hard ceiling on total stream duration. sock_read resets on each
+        # chunk, so a slow trickle can keep a stream alive indefinitely.
+        # STREAM_MAX_DURATION kills the stream regardless.
+        stream_task = asyncio.ensure_future(
+            _stream_to_response(
+                session, request, url, headers, body, cancel_event, response
+            )
+        )
+        try:
+            await asyncio.wait_for(stream_task, timeout=config.STREAM_MAX_DURATION)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Streaming request exceeded max duration (%ds), closing",
+                config.STREAM_MAX_DURATION,
+            )
+            stream_task.cancel()
+    except (aiohttp.ClientError, asyncio.CancelledError):
+        logger.warning(
+            "Streaming proxy request failed (upstream error or cancellation)"
+        )
+    finally:
+        disconnect_task.cancel()
+        try:
+            await disconnect_task
+        except asyncio.CancelledError:
+            pass
 
     logger.info("Streaming proxy request completed")
     await response.write_eof()
     return response
+
+
+async def _stream_to_response(
+    session: aiohttp.ClientSession,
+    request: web.Request,
+    url: str,
+    headers: dict[str, str],
+    body: bytes,
+    cancel_event: asyncio.Event,
+    response: web.StreamResponse,
+) -> None:
+    """Stream upstream response chunks to the downstream client.
+
+    This is the core streaming loop, extracted so it can be wrapped in
+    an ``asyncio.wait_for`` for a hard total-duration timeout.
+    """
+    async for chunk in _stream_response(
+        session,
+        method=request.method,
+        url=url,
+        headers=headers,
+        body=body,
+        buffer_tool_calls=True,
+        validate_json=config.VALIDATE_JSON_ARGS,
+        cancel_event=cancel_event,
+    ):
+        await response.write(chunk)
+
+
+async def _wait_for_disconnect(
+    request: web.Request, cancel_event: asyncio.Event
+) -> None:
+    """Wait for the downstream client to disconnect and set the cancel event.
+
+    This allows the upstream stream to be aborted immediately when the
+    client goes away, rather than continuing to read from litellm into the void.
+    """
+    try:
+        # Poll the transport — aiohttp doesn't expose a clean disconnect awaitable
+        while not cancel_event.is_set():
+            transport = request.transport
+            if transport is None or transport.is_closing():
+                logger.info("Client transport closing, setting cancel event")
+                cancel_event.set()
+                return
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        pass
 
 
 async def _handle_non_streaming(
@@ -183,13 +311,17 @@ async def _handle_non_streaming(
     method: str,
 ) -> web.Response:
     """Handle a non-streaming request with transparent forwarding."""
-    async with aiohttp.ClientSession() as session:
+    session: aiohttp.ClientSession = request.app["client_session"]
+
+    timeout = aiohttp.ClientTimeout(total=config.REQUEST_TIMEOUT)
+
+    try:
         async with session.request(
             method=method,
             url=url,
             headers=headers,
             data=body,
-            timeout=aiohttp.ClientTimeout(total=300),
+            timeout=timeout,
         ) as resp:
             resp_body = await resp.read()
             response = web.Response(
@@ -201,3 +333,67 @@ async def _handle_non_streaming(
                 if lower in NON_STREAMING_FORWARD_HEADERS:
                     response.headers[key] = value
             return response
+    except aiohttp.ClientError as exc:
+        logger.error("Non-streaming upstream error: %s", exc)
+        return web.Response(
+            status=502,
+            content_type="application/json",
+            text=json.dumps({"error": f"upstream error: {exc}"}),
+        )
+    except asyncio.TimeoutError:
+        logger.error("Non-streaming upstream timeout (%ds)", config.REQUEST_TIMEOUT)
+        return web.Response(
+            status=504,
+            content_type="application/json",
+            text=json.dumps(
+                {"error": f"upstream timeout after {config.REQUEST_TIMEOUT}s"}
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# Application lifecycle: shared ClientSession
+# ---------------------------------------------------------------------------
+
+
+async def on_startup(app: web.Application) -> None:
+    """Create a shared aiohttp.ClientSession for all upstream requests.
+
+    Uses ``force_close=True`` to prevent connection reuse. Each request
+    gets a fresh TCP connection that is closed after the response. This
+    eliminates stale connections with unacked data (the 85k+ Send-Q issue).
+
+    The cost is one extra TCP handshake per request, which is negligible
+    for a proxy handling a small number of concurrent sessions.
+    """
+    connector = aiohttp.TCPConnector(
+        limit=config.MAX_UPSTREAM_CONNECTIONS,
+        ttl_dns_cache=300,
+        enable_cleanup_closed=True,
+        keepalive_timeout=config.KEEPALIVE_TIMEOUT,
+        # force_close=True: never reuse connections. Prevents stale connections
+        # from accumulating with unacked data in their Send-Q.
+        force_close=True,
+    )
+    timeout = aiohttp.ClientTimeout(
+        connect=config.CONNECT_TIMEOUT,
+    )
+    session = aiohttp.ClientSession(
+        connector=connector,
+        timeout=timeout,
+    )
+    app["client_session"] = session
+    logger.info(
+        "Created shared ClientSession (limit=%d, connect_timeout=%ds, "
+        "keepalive=%ds, force_close=True)",
+        config.MAX_UPSTREAM_CONNECTIONS,
+        config.CONNECT_TIMEOUT,
+        config.KEEPALIVE_TIMEOUT,
+    )
+
+
+async def on_cleanup(app: web.Application) -> None:
+    """Close the shared ClientSession on shutdown."""
+    session: aiohttp.ClientSession = app["client_session"]
+    await session.close()
+    logger.info("Closed shared ClientSession")

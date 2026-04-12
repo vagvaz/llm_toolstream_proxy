@@ -270,7 +270,108 @@ The proxy detects `finish_reason: "tool_calls"` or `"stop"` in any chunk and mar
 | `PROXY_LOG_FILE` | `llm_proxy.log` | Log file path (10MB rotation, 7-day retention) |
 | `PROXY_BUFFER_TOOLS` | `true` | Enable/disable tool call buffering |
 | `PROXY_VALIDATE_JSON` | `true` | Attempt JSON repair on buffered tool call arguments |
-| `PROXY_STREAM_TIMEOUT` | `300` | Stream read timeout in seconds |
+| `PROXY_STREAM_TIMEOUT` | `120` | Max seconds to wait between SSE chunks from upstream |
+| `PROXY_STREAM_MAX_DURATION` | `600` | Hard ceiling on total stream duration (seconds) |
+| `PROXY_MAX_UPSTREAM_CONNECTIONS` | `100` | Max concurrent connections to upstream |
+| `PROXY_REQUEST_TIMEOUT` | `300` | Total timeout for non-streaming requests (seconds) |
+| `PROXY_CONNECT_TIMEOUT` | `15` | Timeout for connecting to upstream (seconds) |
+| `PROXY_KEEPALIVE_TIMEOUT` | `30` | Seconds to keep idle connections in pool |
+| `PROXY_MAX_ARGS_SIZE` | `1048576` | Max accumulated arguments per tool call (bytes) |
+| `PROXY_MAX_TOOL_CALLS` | `32` | Max tool calls per request |
+
+## Resource Management & Reliability
+
+### Why the proxy stalled the host machine (85k+ Send-Q)
+
+The proxy runs on a separate machine from litellm. Observed symptom: `ss -tn`
+showed **85k+ Send-Q** on connections to the upstream (litellm). Send-Q is the
+kernel's TCP send buffer — data the proxy has written but litellm hasn't
+acknowledged. When these buffers accumulate across many stuck connections, the
+kernel's network stack spends all its CPU on retransmissions and eventually
+can't accept new connections (including SSH).
+
+**Root cause**: connections to litellm that never close properly. The proxy
+opened a TCP connection, sent the request body, and then waited for the SSE
+response. If litellm stopped responding (or the response trickled in slowly),
+the connection stayed open with unacked data in the Send-Q. With no hard
+timeout on total stream duration, these zombie connections accumulated
+indefinitely.
+
+Specific issues in the original code:
+
+1. **`total=None` on streaming requests** — no maximum duration. A stream could
+   run forever if data trickled in slowly (each chunk resets the `sock_read`
+   timer). Zombie streams with 85k+ Send-Q accumulated.
+2. **Connection pooling with `force_close=False`** — after a long streaming
+   request, the connection could be in a bad state. Reusing it meant the next
+   request also got stuck.
+3. **No `Connection: close` on streaming requests** — the upstream didn't know
+   to close the connection after the stream ended, so stale connections
+   lingered.
+4. **`STREAM_TIMEOUT=300`** (5 min sock-read) — way too long. If litellm
+   stopped sending data, the proxy waited 5 minutes per chunk before giving up.
+5. **No client disconnect detection** — if opencode disconnected mid-stream,
+   the proxy kept reading from litellm into the void, holding the upstream
+   connection open.
+
+### Fixes applied
+
+| Problem | Fix |
+|---------|-----|
+| Zombie streams with no hard timeout | `STREAM_MAX_DURATION=600s` caps total stream time via `asyncio.wait_for`. Even if data trickles in (resetting sock_read), the stream is killed after 10 minutes. |
+| Stale connections with unacked Send-Q | `force_close=True` on TCPConnector — every request gets a fresh connection that is closed after use. No connection reuse means no stale connections. |
+| Upstream not closing connections | `Connection: close` header on streaming requests tells litellm to close the connection after the response. |
+| No client disconnect detection | `_wait_for_disconnect()` polls `request.transport.is_closing()` and sets a cancel event that aborts the upstream stream immediately. |
+| sock_read timeout too long | `STREAM_TIMEOUT` reduced from 300s to 120s. If upstream stops sending for 2 minutes, the stream is aborted. |
+| No connect timeout | `CONNECT_TIMEOUT=15s` prevents hanging on unreachable upstreams. |
+| No request timeout for non-streaming | `REQUEST_TIMEOUT=300s` caps total time for non-streaming requests. |
+| Unbounded argument accumulation | `MAX_ARGUMENTS_SIZE=1MB` truncates further deltas when exceeded. |
+| Unbounded tool call count | `MAX_TOOL_CALLS=32` rejects new tool calls beyond the limit. |
+| No worker recycling | `--max-requests 10000 --max-requests-jitter 1000` recycles gunicorn workers to prevent memory/FD leaks. |
+| No graceful shutdown | `on_cleanup` hook closes the shared `ClientSession` properly. |
+| Non-streaming upstream errors crash the handler | `_handle_non_streaming` now catches `ClientError` (502) and `TimeoutError` (504). |
+
+### Why gunicorn causes the 85k+ Send-Q stall
+
+**Gunicorn's worker timeout kills workers mid-stream.** The `--timeout` flag
+tells gunicorn to SIGKILL any worker that hasn't completed a request within N
+seconds. For streaming SSE responses that routinely take 2-5 minutes, this
+means gunicorn kills workers while they're still reading from litellm and
+writing to opencode.
+
+When a worker is killed mid-stream:
+1. The worker process is SIGKILL'd — no cleanup, no graceful shutdown
+2. All its TCP connections are left half-open with data in their Send-Q
+3. The kernel keeps retransmitting that data (85k+ per connection)
+4. These orphaned connections accumulate until the network stack chokes
+5. SSH can't establish new connections because the kernel is busy retransmitting
+
+This was confirmed by the user: the same proxy code works fine when run
+directly via `python -m llm_toolstream_proxy.main` (no gunicorn), but stalls
+when deployed via gunicorn. Another aiohttp-based proxy had the same issue
+with gunicorn but not with direct deployment.
+
+**Solution: don't use gunicorn.** The proxy now runs directly via
+`web.run_app()` with optional uvloop for performance. Gunicorn's process
+management model is designed for sync WSGI workers, not long-lived SSE streams.
+
+### Recommended OS-level TCP tuning
+
+On the proxy machine, set these in `/etc/sysctl.d/99-llm-proxy.conf`:
+
+```ini
+# Detect dead connections faster (default: 7200s)
+net.ipv4.tcp_keepalive_time = 60
+net.ipv4.tcp_keepalive_intvl = 10
+net.ipv4.tcp_keepalive_probes = 6
+
+# Reduce TCP retry timeout (default: 15 min)
+net.ipv4.tcp_retries1 = 3
+net.ipv4.tcp_retries2 = 5
+
+# Allow reuse of sockets in TIME_WAIT state
+net.ipv4.tcp_tw_reuse = 1
+```
 
 ## Request Flow Diagrams
 
