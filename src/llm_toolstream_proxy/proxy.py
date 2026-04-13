@@ -34,6 +34,7 @@ from aiohttp import web
 from loguru import logger
 
 from . import config
+from .metrics import RequestMetrics
 from .sse import SSETransformer
 
 _START_TIME = time.monotonic()
@@ -127,7 +128,7 @@ async def _stream_response(
     buffer_tool_calls: bool,
     validate_json: bool,
     cancel_event: asyncio.Event,
-    req_metrics: Any | None = None,
+    req_metrics: RequestMetrics | None = None,
 ) -> AsyncIterator[bytes]:
     """Stream the response from litellm, applying tool call buffering if needed.
 
@@ -255,7 +256,7 @@ async def _handle_streaming(
     url: str,
     headers: dict[str, str],
     body: bytes,
-    req_metrics: Any,
+    req_metrics: RequestMetrics,
 ) -> web.StreamResponse:
     """Handle a streaming request with tool call buffering.
 
@@ -399,7 +400,7 @@ async def _stream_to_response(
     body: bytes,
     cancel_event: asyncio.Event,
     response: web.StreamResponse,
-    req_metrics: Any | None = None,
+    req_metrics: RequestMetrics | None = None,
 ) -> None:
     """Stream upstream response chunks to the downstream client.
 
@@ -449,7 +450,7 @@ async def _handle_non_streaming(
     headers: dict[str, str],
     body: bytes,
     method: str,
-    req_metrics: Any,
+    req_metrics: RequestMetrics,
 ) -> web.Response:
     """Handle a non-streaming request with transparent forwarding."""
     session: aiohttp.ClientSession = request.app["client_session"]

@@ -7,6 +7,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
+from aiohttp import web
 from loguru import logger
 
 
@@ -120,8 +121,6 @@ collector = MetricsCollector()
 
 
 # aiohttp web handler for /metrics endpoint
-async def metrics_handler(request: Any) -> Any:
+async def metrics_handler(request: web.Request) -> web.Response:
     """Return metrics as JSON for the /metrics endpoint."""
-    from aiohttp import web
-
     return web.json_response(collector.get_metrics())
