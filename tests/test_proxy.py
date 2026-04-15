@@ -75,6 +75,8 @@ def encode_sse_done() -> str:
 class MockUpstreamServer:
     """A mock upstream (litellm) server for testing proxy behavior."""
 
+    base_url: str
+
     def __init__(self) -> None:
         self.app = web.Application()
         # Store handlers as instance variables so they can be replaced
@@ -92,7 +94,7 @@ class MockUpstreamServer:
     ) -> web.StreamResponse | web.Response:
         """Route to the current chat completions handler."""
         if self._custom_handler is not None:
-            return await self._custom_handler(request)
+            return await self._custom_handler(request)  # type: ignore[no-any-return]
         return await self._chat_completions_handler(request)
 
     async def _route_health(self, request: web.Request) -> web.Response:
@@ -497,7 +499,7 @@ async def test_concurrent_stream_limit(
     }
 
     # Start two streaming requests to fill the semaphore
-    async def make_streaming_request() -> web.StreamResponse | web.Response:
+    async def make_streaming_request() -> Any:
         return await client.request(
             "POST",
             "/v1/chat/completions",
