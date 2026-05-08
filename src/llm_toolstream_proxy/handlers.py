@@ -10,25 +10,43 @@ import time
 
 from aiohttp import web
 
-from . import config
+from .config import Config
+from .metrics import MetricsCollector
 
 _START_TIME = time.monotonic()
 
 
-async def handle_health(request: web.Request) -> web.Response:
-    """Health check endpoint returning proxy status and uptime."""
+async def handle_health(
+    request: web.Request,
+    *,
+    cfg: Config,
+) -> web.Response:
+    """Health check endpoint returning proxy status and uptime.
+
+    Args:
+        cfg: Explicitly required — no hidden global fallback. Caller must
+            provide a Config instance (typically via ``create_app``).
+    """
     return web.json_response(
         {
             "status": "ok",
             "version": "0.1.0",
-            "upstream": config.LITELLM_URL,
+            "upstream": cfg.LITELLM_URL,
             "uptime_seconds": round(time.monotonic() - _START_TIME, 1),
         }
     )
 
 
-async def handle_metrics(request: web.Request) -> web.Response:
-    """Metrics endpoint returning aggregate request statistics."""
-    from .metrics import collector
+async def handle_metrics(
+    request: web.Request,
+    *,
+    metrics_collector: MetricsCollector,
+) -> web.Response:
+    """Metrics endpoint returning aggregate request statistics.
 
-    return web.json_response(collector.get_metrics())
+    Args:
+        metrics_collector: Explicitly required — no hidden global fallback.
+            Caller must provide a MetricsCollector instance (typically via
+            ``create_app``).
+    """
+    return web.json_response(metrics_collector.get_metrics())
