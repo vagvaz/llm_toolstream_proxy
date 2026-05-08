@@ -26,6 +26,33 @@ from .buffering import ToolCallBuffer, ToolCallDeltaEmit
 DONE_SENTINEL = "[DONE]"
 
 
+# Backward-compatible alias: tests import this as a module-level function.
+# New code should use SSETransformer._wrap_event() instead.
+def _build_tool_call_chunk(
+    tc_delta: ToolCallDeltaEmit,
+    index: int,
+    *,
+    id: str = "chatcmpl-tool-buffer",
+    object: str = "chat.completion.chunk",
+    created: int = 0,
+    model: str = "",
+) -> dict[str, Any]:
+    """Build an SSE chunk dict containing a single tool call delta."""
+    return {
+        "id": id,
+        "object": object,
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": index,
+                "delta": {"tool_calls": [tc_delta]},
+                "finish_reason": None,
+            }
+        ],
+    }
+
+
 def parse_sse_line(line: str) -> dict[str, Any] | None:
     """Parse a single ``data: ...`` SSE line into a dict.
 
@@ -109,55 +136,6 @@ def _extract_tool_calls(
     return tool_call_deltas, chunk
 
 
-def _build_tool_call_chunk(
-    tc_delta: ToolCallDeltaEmit,
-    index: int,
-    *,
-    id: str = "chatcmpl-tool-buffer",
-    object: str = "chat.completion.chunk",
-    created: int = 0,
-    model: str = "",
-) -> dict[str, Any]:
-    """Build an SSE chunk dict containing a single tool call delta."""
-    return {
-        "id": id,
-        "object": object,
-        "created": created,
-        "model": model,
-        "choices": [
-            {
-                "index": index,
-                "delta": {"tool_calls": [tc_delta]},
-                "finish_reason": None,
-            }
-        ],
-    }
-
-
-def _inject_tool_call_events(
-    chunk: dict[str, Any],
-    choice_index: int,
-    tool_call_deltas: list[ToolCallDeltaEmit],
-) -> list[dict[str, Any]]:
-    """Create properly formed SSE chunk dicts with tool_call deltas
-    injected into a specific choice.
-
-    Each delta becomes its own chunk so that downstream consumers
-    process them one at a time, matching the original streaming behavior.
-    """
-    return [
-        _build_tool_call_chunk(
-            tc_delta,
-            index=choice_index,
-            id=chunk.get("id", "chatcmpl-tool-buffer"),
-            object=chunk.get("object", "chat.completion.chunk"),
-            created=chunk.get("created", 0),
-            model=chunk.get("model", ""),
-        )
-        for tc_delta in tool_call_deltas
-    ]
-
-
 class SSELineBuffer:
     """Accumulates raw SSE lines and yields complete event payloads.
 
@@ -237,6 +215,73 @@ class SSETransformer:
         self._done = False
         self._line_buffer = SSELineBuffer()
 
+    def _wrap_event(
+        self,
+        tc_delta: ToolCallDeltaEmit,
+        choice_index: int,
+        *,
+        id: str = "chatcmpl-tool-buffer",
+        object: str = "chat.completion.chunk",
+        created: int = 0,
+        model: str = "",
+    ) -> dict[str, Any]:
+        """Build a full SSE chunk dict containing a single tool call delta.
+
+        Internal to SSETransformer — called after the buffer has decided
+        what to emit. This keeps wrapping knowledge (SSE chunk structure,
+        metadata propagation) in one place rather than spread across callers.
+        """
+        return {
+            "id": id,
+            "object": object,
+            "created": created,
+            "model": model,
+            "choices": [
+                {
+                    "index": choice_index,
+                    "delta": {"tool_calls": [tc_delta]},
+                    "finish_reason": None,
+                }
+            ],
+        }
+
+    def _wrap_events(
+        self,
+        tc_deltas: list[ToolCallDeltaEmit],
+        choice_index: int,
+        chunk_metadata: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Build properly formed SSE chunk dicts with tool_call deltas injected.
+
+        Internal to SSETransformer — each delta becomes its own chunk so that
+        downstream consumers process them one at a time, matching the original
+        streaming behaviour. metadata (id, object, created, model) is drawn from
+        chunk_metadata, defaulting if not present.
+        """
+        return [
+            self._wrap_event(
+                tc_delta,
+                choice_index=choice_index,
+                id=chunk_metadata.get("id", "chatcmpl-tool-buffer"),
+                object=chunk_metadata.get("object", "chat.completion.chunk"),
+                created=chunk_metadata.get("created", 0),
+                model=chunk_metadata.get("model", ""),
+            )
+            for tc_delta in tc_deltas
+        ]
+
+    def _mark_finished_tool_calls(self, choices: list[dict[str, Any]]) -> None:
+        """Scan choices for finish_reason and mark matching tool calls as finished."""
+        for ch in choices:
+            finish_reason = ch.get("finish_reason")
+            if finish_reason == "tool_calls" or finish_reason == "stop":
+                logger.debug(
+                    "Finish reason {} for choice {}: finishing all tool calls",
+                    finish_reason,
+                    ch.get("index", 0),
+                )
+                self.buffer.finish_all()
+
     def process_raw(self, raw_line: str) -> list[str]:
         """Process a raw SSE line from upstream.
 
@@ -263,24 +308,6 @@ class SSETransformer:
             output_lines.extend(event_output)
 
         return output_lines
-
-    def _mark_finished_tool_calls(self, choices: list[dict[str, Any]]) -> None:
-        """Scan choices for finish_reason and mark matching tool calls as finished."""
-        for ch in choices:
-            finish_reason = ch.get("finish_reason")
-            if finish_reason == "tool_calls" or finish_reason == "stop":
-                choice_index = ch.get("index", 0)
-                finish_indices = list(self.buffer.calls.keys())
-                for idx in finish_indices:
-                    if self.buffer.calls[idx].name is not None:
-                        logger.debug(
-                            "Finish reason {} for choice {}: "
-                            "marking tool call {} finished",
-                            finish_reason,
-                            choice_index,
-                            idx,
-                        )
-                        self.buffer.finish_call(idx)
 
     def _process_complete_event(self, payload: str) -> list[str]:
         """Process a complete SSE event payload (after line joining)."""
@@ -342,8 +369,8 @@ class SSETransformer:
                         len(buffered_events),
                         choice_index,
                     )
-                    for event_chunk in _inject_tool_call_events(
-                        parsed, choice_index, buffered_events
+                    for event_chunk in self._wrap_events(
+                        buffered_events, choice_index, parsed
                     ):
                         output_lines.append(encode_sse_event(event_chunk))
 
@@ -369,7 +396,11 @@ class SSETransformer:
             )
             for tc_delta in flush_events:
                 idx = tc_delta["index"]
-                chunk = _build_tool_call_chunk(tc_delta, index=idx)
+                chunk = self._wrap_event(
+                    tc_delta,
+                    choice_index=idx,
+                    id=tc_delta.get("id", "chatcmpl-tool-buffer"),
+                )
                 output_lines.append(encode_sse_event(chunk))
 
         output_lines.append(encode_sse_done())
