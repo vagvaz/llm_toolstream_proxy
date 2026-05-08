@@ -41,7 +41,7 @@ mypy_path = "src"
 [[tool.mypy.overrides]]
 module = "tests.*"
 strict = false
-disable_error_code = ["no-untyped-def", "type-arg"]
+disable_error_code = ["no-untyped-def", "type-arg", "typeddict-item"]
 
 [project.scripts]
 llm-toolstream-proxy = "llm_toolstream_proxy.main:main"

@@ -34,9 +34,51 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypedDict
 
 from loguru import logger
+
+# ---------------------------------------------------------------------------
+# TypedDicts for emitted tool call deltas
+# ---------------------------------------------------------------------------
+
+
+class _FunctionWithName(TypedDict):
+    name: str
+    arguments: str
+
+
+class _FunctionArgsOnly(TypedDict):
+    arguments: str
+
+
+class ToolCallStartEvent(TypedDict):
+    """Emitted when a buffered call's metadata (id + name) is complete.
+
+    Each delta becomes its own SSE chunk so that downstream consumers
+    process them one at a time, matching the original streaming behavior.
+    """
+
+    index: int
+    id: str
+    type: str
+    function: _FunctionWithName
+
+
+class ToolCallArgsDelta(TypedDict):
+    """Emitted for a single argument fragment after a call has started."""
+
+    index: int
+    function: _FunctionArgsOnly
+
+
+# Union of all emitted delta shapes from ToolCallBuffer.
+ToolCallDeltaEmit = ToolCallStartEvent | ToolCallArgsDelta
+
+
+# ---------------------------------------------------------------------------
+# Sanitization helpers
+# ---------------------------------------------------------------------------
 
 
 def _sanitize_name(value: object) -> str | None:
@@ -161,7 +203,7 @@ class ToolCallBuffer:
             self.calls[index] = BufferedToolCall()
         return self.calls[index]
 
-    def process_delta(self, delta_tc: dict[str, Any]) -> list[dict[str, Any]]:
+    def process_delta(self, delta_tc: dict[str, Any]) -> list[ToolCallDeltaEmit]:
         """Process a single tool_call delta from a streaming chunk.
 
         Args:
@@ -234,7 +276,7 @@ class ToolCallBuffer:
             else:
                 call.arguments += args
 
-        events: list[dict[str, Any]] = []
+        events: list[ToolCallDeltaEmit] = []
 
         if call.started:
             if args:
@@ -252,21 +294,25 @@ class ToolCallBuffer:
                 )
         elif call.is_complete:
             call.started = True
+            tc_id = call.id
+            tc_name = call.name
+            # guaranteed by is_complete
+            assert tc_id is not None and tc_name is not None
             logger.info(
                 "Tool call {!r} index {}: emitting start "
                 "(id={!r}, buffered_args={} bytes)",
-                call.name,
+                tc_name,
                 index,
-                call.id,
+                tc_id,
                 len(call.arguments),
             )
             events.append(
                 {
                     "index": index,
-                    "id": call.id,
+                    "id": tc_id,
                     "type": call.type,
                     "function": {
-                        "name": call.name,
+                        "name": tc_name,
                         "arguments": "",
                     },
                 }
@@ -356,21 +402,9 @@ class ToolCallBuffer:
                 len(call.arguments),
             )
 
-    def flush(self) -> list[dict[str, Any]]:
-        """Flush any remaining buffered tool calls on stream end.
-
-        Called when the SSE stream sends ``[DONE]``. Handles three cases:
-
-        1. **Started but not finished**: Validate arguments. Cannot repair
-           (already streamed to client). Log warning.
-        2. **Buffered and complete**: Emit the full tool call with repaired
-           arguments if needed.
-        3. **Still incomplete (missing id or name)**: Discard with a warning.
-
-        Returns:
-            List of tool_call deltas to emit before the ``[DONE]`` sentinel.
-        """
-        events: list[dict[str, Any]] = []
+    def flush(self) -> list[ToolCallStartEvent]:
+        ...
+        events: list[ToolCallStartEvent] = []
 
         for index in sorted(self.calls.keys()):
             call = self.calls[index]
@@ -423,13 +457,17 @@ class ToolCallBuffer:
                     )
 
             call.finished = True
+            flush_id = call.id
+            flush_name = call.name
+            # per is_complete guard
+            assert flush_id is not None and flush_name is not None
             events.append(
                 {
                     "index": index,
-                    "id": call.id,
+                    "id": flush_id,
                     "type": call.type,
                     "function": {
-                        "name": call.name,
+                        "name": flush_name,
                         "arguments": arguments,
                     },
                 }
