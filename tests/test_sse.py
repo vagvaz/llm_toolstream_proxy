@@ -2,8 +2,11 @@
 
 import json
 
+from llm_toolstream_proxy.buffering import ToolCallArgsDelta, ToolCallStartEvent
 from llm_toolstream_proxy.sse import (
+    SSELineBuffer,
     SSETransformer,
+    _build_tool_call_chunk,
     encode_sse_done,
     encode_sse_event,
     parse_sse_line,
@@ -287,3 +290,162 @@ class TestSSETransformerBuffering:
         )
         lines2 = transformer.process_raw(_encode_chunk(chunk2))
         assert len(lines2) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Tests for extracted SSELineBuffer (Candidate 1)
+# ---------------------------------------------------------------------------
+
+
+class TestSSELineBuffer:
+    """Test the SSE line buffer in isolation — no tool call state involved."""
+
+    def test_single_line_event(self):
+        buf = SSELineBuffer()
+        payloads = buf.feed('data: {"key": "val"}\n\n')
+        assert len(payloads) == 1
+        assert payloads[0] == '{"key": "val"}'
+
+    def test_multi_line_event(self):
+        buf = SSELineBuffer()
+        # Feed first data line without trailing blank line (incomplete)
+        payloads = buf.feed("data: first")
+        assert len(payloads) == 0  # incomplete — no blank line yet
+
+        # Feed second line with blank line to complete the event
+        payloads = buf.feed("data: second\n\n")
+        assert len(payloads) == 1
+        assert "first" in payloads[0] and "second" in payloads[0]
+
+    def test_event_with_comment_lines(self):
+        buf = SSELineBuffer()
+        payloads = buf.feed(": heartbeat\n\n")
+        assert len(payloads) == 0  # comment-only event yields no data payload
+
+    def test_multiple_events_in_one_feed(self):
+        buf = SSELineBuffer()
+        payloads = buf.feed(
+            'data: {"a": 1}\n\n'
+            'data: {"b": 2}\n\n'
+        )
+        assert len(payloads) == 2
+        assert payloads[0] == '{"a": 1}'
+        assert payloads[1] == '{"b": 2}'
+
+    def test_partial_line_across_feeds(self):
+        buf = SSELineBuffer()
+        # Feed line without trailing newline — incomplete event
+        payloads = buf.feed("data: first")
+        assert len(payloads) == 0
+
+        # Trailing blank line completes the event
+        payloads = buf.feed("\n")
+        assert len(payloads) == 1
+        assert payloads[0] == "first"
+
+    def test_reset_clears_buffered_lines(self):
+        buf = SSELineBuffer()
+        buf.feed("data: incomplete\n")
+        buf.reset()
+        payloads = buf.feed("\n")
+        assert len(payloads) == 0
+
+    def test_done_sentinel(self):
+        buf = SSELineBuffer()
+        payloads = buf.feed("data: [DONE]\n\n")
+        assert len(payloads) == 1
+        assert payloads[0] == "[DONE]"
+
+    def test_non_data_prefix_lines_ignored(self):
+        buf = SSELineBuffer()
+        payloads = buf.feed("event: ping\ndata: hello\n\n")
+        assert len(payloads) == 1
+        assert payloads[0] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Tests for _build_tool_call_chunk (Candidate 6)
+# ---------------------------------------------------------------------------
+
+
+class TestBuildToolCallChunk:
+    """Test the shared chunk construction function."""
+
+    def test_start_event_chunk(self):
+        delta: ToolCallStartEvent = {
+            "index": 0,
+            "id": "call_abc",
+            "type": "function",
+            "function": {"name": "bash", "arguments": ""},
+        }
+        chunk = _build_tool_call_chunk(delta, index=0)
+
+        assert chunk["choices"][0]["index"] == 0
+        assert chunk["choices"][0]["delta"]["tool_calls"][0] is delta
+        assert chunk["id"] == "chatcmpl-tool-buffer"
+        assert chunk["object"] == "chat.completion.chunk"
+
+    def test_args_delta_chunk(self):
+        delta: ToolCallArgsDelta = {
+            "index": 0,
+            "function": {"arguments": '{"cmd":' },
+        }
+        chunk = _build_tool_call_chunk(delta, index=3)
+
+        assert chunk["choices"][0]["index"] == 3
+        assert chunk["choices"][0]["delta"]["tool_calls"][0] is delta
+
+    def test_custom_defaults(self):
+        delta: ToolCallStartEvent = {
+            "index": 0,
+            "id": "x",
+            "type": "function",
+            "function": {"name": "n", "arguments": ""},
+        }
+        chunk = _build_tool_call_chunk(
+            delta,
+            index=0,
+            id="custom-id",
+            object="custom.object",
+            created=42,
+            model="custom-model",
+        )
+        assert chunk["id"] == "custom-id"
+        assert chunk["object"] == "custom.object"
+        assert chunk["created"] == 42
+        assert chunk["model"] == "custom-model"
+
+    def test_derived_from_parent_chunk(self):
+        parent: dict[str, object] = {
+            "id": "chatcmpl-parent",
+            "object": "chat.completion.chunk",
+            "created": 999,
+            "model": "gpt-4",
+        }
+        delta: ToolCallStartEvent = {
+            "index": 0,
+            "id": "call_x",
+            "type": "function",
+            "function": {"name": "echo", "arguments": ""},
+        }
+        chunk = _build_tool_call_chunk(
+            delta,
+            index=0,
+            id=parent.get("id", "chatcmpl-tool-buffer"),  # type: ignore[arg-type]
+            object=parent.get("object", "chat.completion.chunk"),  # type: ignore[arg-type]
+            created=parent.get("created", 0),  # type: ignore[arg-type]
+            model=parent.get("model", ""),  # type: ignore[arg-type]
+        )
+        assert chunk["id"] == "chatcmpl-parent"
+        assert chunk["model"] == "gpt-4"
+        assert chunk["created"] == 999
+
+    def test_finish_reason_is_none(self):
+        delta: ToolCallStartEvent = {
+            "index": 0,
+            "id": "call_x",
+            "type": "function",
+            "function": {"name": "n", "arguments": ""},
+        }
+        chunk = _build_tool_call_chunk(delta, index=0)
+        assert chunk["choices"][0]["finish_reason"] is None
