@@ -17,8 +17,9 @@ import aiohttp
 from aiohttp import web
 from loguru import logger
 
-from . import config
-from .metrics import RequestMetrics
+from . import config as cfg_module
+from .config import Config
+from .metrics import MetricsCollector, RequestMetrics
 from .sse import SSETransformer
 
 # --- aiohttp AppKey constants for typed application state ---
@@ -27,6 +28,7 @@ _client_session = web.AppKey("client_session", aiohttp.ClientSession)
 _stream_semaphore = web.AppKey("stream_semaphore", asyncio.Semaphore)
 _shutdown_event = web.AppKey("shutdown_event", asyncio.Event)
 _active_streams = web.AppKey("active_streams", list)
+_metrics_collector = web.AppKey("metrics_collector", MetricsCollector)
 
 
 async def _stream_response(
@@ -36,6 +38,7 @@ async def _stream_response(
     headers: dict[str, str],
     body: bytes,
     *,
+    cfg: Config,
     buffer_tool_calls: bool,
     validate_json: bool,
     cancel_event: asyncio.Event,
@@ -52,8 +55,8 @@ async def _stream_response(
     transformer = (
         SSETransformer(
             validate_json=validate_json,
-            max_arguments_size=config.MAX_ARGUMENTS_SIZE,
-            max_tool_calls=config.MAX_TOOL_CALLS,
+            max_arguments_size=cfg.MAX_ARGUMENTS_SIZE,
+            max_tool_calls=cfg.MAX_TOOL_CALLS,
         )
         if buffer_tool_calls
         else None
@@ -61,8 +64,8 @@ async def _stream_response(
 
     timeout = aiohttp.ClientTimeout(
         total=None,  # no total limit — controlled by STREAM_MAX_DURATION wrapper
-        connect=config.CONNECT_TIMEOUT,
-        sock_read=config.STREAM_TIMEOUT,
+        connect=cfg.CONNECT_TIMEOUT,
+        sock_read=cfg.STREAM_TIMEOUT,
     )
 
     ttfb_recorded = False
@@ -126,6 +129,8 @@ async def _stream_to_response(
     body: bytes,
     cancel_event: asyncio.Event,
     response: web.StreamResponse,
+    *,
+    cfg: Config,
     req_metrics: RequestMetrics | None = None,
 ) -> None:
     """Stream upstream response chunks to the downstream client.
@@ -140,8 +145,9 @@ async def _stream_to_response(
         url=url,
         headers=headers,
         body=body,
+        cfg=cfg,
         buffer_tool_calls=True,
-        validate_json=config.VALIDATE_JSON_ARGS,
+        validate_json=cfg.VALIDATE_JSON_ARGS,
         cancel_event=cancel_event,
         req_metrics=req_metrics,
     ):
@@ -175,6 +181,9 @@ async def handle_streaming(
     headers: dict[str, str],
     body: bytes,
     req_metrics: RequestMetrics,
+    *,
+    cfg: Config | None = None,
+    metrics_collector: MetricsCollector | None = None,
 ) -> web.StreamResponse:
     """Handle a streaming request with tool call buffering.
 
@@ -183,14 +192,19 @@ async def handle_streaming(
     streams via a semaphore; returns 503 when the limit is exceeded or
     the proxy is shutting down.
     """
-    from .metrics import collector
+    if cfg is None:
+        cfg = cfg_module.config
+    if metrics_collector is None:
+        from .metrics import collector as _default_collector
+
+        metrics_collector = _default_collector
 
     app = request.app
 
     # Reject new requests if the proxy is shutting down
     shutdown_event: asyncio.Event = app[_shutdown_event]
     if shutdown_event.is_set():
-        collector.record_error("proxy_shutting_down")
+        metrics_collector.record_error("proxy_shutting_down")
         req_metrics.error = "proxy_shutting_down"
         return web.Response(
             status=503,
@@ -206,9 +220,9 @@ async def handle_streaming(
         # All slots are taken — reject with 503
         logger.warning(
             "Rejecting streaming request: MAX_CONCURRENT_STREAMS ({}) reached",
-            config.MAX_CONCURRENT_STREAMS,
+            cfg.MAX_CONCURRENT_STREAMS,
         )
-        collector.record_error("concurrent_stream_limit")
+        metrics_collector.record_error("concurrent_stream_limit")
         req_metrics.error = "concurrent_stream_limit"
         return web.Response(
             status=503,
@@ -218,7 +232,7 @@ async def handle_streaming(
                     "error": "proxy overloaded",
                     "detail": (
                         f"max concurrent streams "
-                        f"({config.MAX_CONCURRENT_STREAMS}) reached"
+                        f"({cfg.MAX_CONCURRENT_STREAMS}) reached"
                     ),
                 }
             ),
@@ -271,18 +285,19 @@ async def handle_streaming(
                         body,
                         cancel_event,
                         response,
-                        req_metrics,
+                        cfg=cfg,
+                        req_metrics=req_metrics,
                     )
                 )
                 try:
                     await asyncio.wait_for(
-                        stream_task, timeout=config.STREAM_MAX_DURATION
+                        stream_task, timeout=cfg.STREAM_MAX_DURATION
                     )
                 except asyncio.TimeoutError:
                     logger.warning(
                         "[{}] Streaming request exceeded max duration ({}s), closing",
                         req_metrics.request_id,
-                        config.STREAM_MAX_DURATION,
+                        cfg.STREAM_MAX_DURATION,
                     )
                     req_metrics.error = "stream_max_duration"
                     stream_task.cancel()

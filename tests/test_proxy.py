@@ -10,13 +10,12 @@ from __future__ import annotations
 import asyncio
 import json
 from typing import Any, AsyncIterator
-from unittest.mock import patch
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from llm_toolstream_proxy import config
+from llm_toolstream_proxy.config import Config
 from llm_toolstream_proxy.main import create_app
 
 # -----------------------------------------------------------------------------
@@ -147,6 +146,25 @@ class MockUpstreamServer:
 # -----------------------------------------------------------------------------
 
 
+def _make_test_config(
+    mock_upstream: MockUpstreamServer | None = None,
+    max_concurrent_streams: int = 2,
+    max_request_body_size: int = 1024 * 1024,
+) -> Config:
+    """Create a Config instance suitable for testing."""
+    kwargs: dict[str, Any] = {
+        "MAX_CONCURRENT_STREAMS": max_concurrent_streams,
+        "MAX_REQUEST_BODY_SIZE": max_request_body_size,
+        "STREAM_TIMEOUT": 5.0,
+        "CONNECT_TIMEOUT": 5.0,
+        "STREAM_MAX_DURATION": 30.0,
+        "KEEPALIVE_TIMEOUT": 1.0,
+    }
+    if mock_upstream is not None:
+        kwargs["LITELLM_URL"] = mock_upstream.base_url
+    return Config(**kwargs)
+
+
 @pytest.fixture
 async def mock_upstream() -> AsyncIterator[MockUpstreamServer]:
     """Create a mock upstream server."""
@@ -168,15 +186,12 @@ async def mock_upstream() -> AsyncIterator[MockUpstreamServer]:
 @pytest.fixture
 async def client(mock_upstream: MockUpstreamServer) -> AsyncIterator[TestClient]:
     """Create a test client for the proxy app with mocked upstream."""
-    # Patch config to point to mock upstream
-    with patch.object(config, "LITELLM_URL", mock_upstream.base_url):
-        with patch.object(config, "MAX_CONCURRENT_STREAMS", 2):
-            with patch.object(config, "MAX_REQUEST_BODY_SIZE", 1024 * 1024):  # 1MB
-                app = create_app()
-                client = TestClient(TestServer(app))
-                await client.start_server()
-                yield client
-                await client.close()
+    cfg = _make_test_config(mock_upstream=mock_upstream)
+    app = create_app(cfg=cfg)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    yield client
+    await client.close()
 
 
 # -----------------------------------------------------------------------------

@@ -335,7 +335,7 @@ class TestBufferingNameNotOverwritten:
                 "function": {"name": "", "arguments": '{"path":'},
             }
         )
-        assert buf.calls[0].name == "read_file"
+        assert buf._calls[0].name == "read_file"
 
     def test_name_not_overwritten_by_null_string(self):
         buf = ToolCallBuffer()
@@ -353,7 +353,7 @@ class TestBufferingNameNotOverwritten:
                 "function": {"name": "null", "arguments": '{"cmd": "ls"}'},
             }
         )
-        assert buf.calls[0].name == "bash"
+        assert buf._calls[0].name == "bash"
 
 
 class TestBufferingMultipleCalls:
@@ -474,4 +474,4 @@ class TestBufferingMultipleCalls:
         assert len(ev) == 2
         assert ev[0]["function"]["name"] == "read_file"
         assert ev[1]["function"]["arguments"] == '{"path": "/tmp"}'
-        assert buf.calls[0].arguments == '{"path": "/tmp"}'
+        assert buf._calls[0].arguments == '{"path": "/tmp"}'

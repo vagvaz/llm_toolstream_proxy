@@ -193,15 +193,15 @@ class ToolCallBuffer:
         max_arguments_size: int = 1024 * 1024,
         max_tool_calls: int = 32,
     ) -> None:
-        self.calls: dict[int, BufferedToolCall] = {}
+        self._calls: dict[int, BufferedToolCall] = {}
         self.validate_json = validate_json
         self.max_arguments_size = max_arguments_size
         self.max_tool_calls = max_tool_calls
 
     def _get_or_create(self, index: int) -> BufferedToolCall:
-        if index not in self.calls:
-            self.calls[index] = BufferedToolCall()
-        return self.calls[index]
+        if index not in self._calls:
+            self._calls[index] = BufferedToolCall()
+        return self._calls[index]
 
     def process_delta(self, delta_tc: dict[str, Any]) -> list[ToolCallDeltaEmit]:
         """Process a single tool_call delta from a streaming chunk.
@@ -239,7 +239,7 @@ class ToolCallBuffer:
         call = self._get_or_create(index)
 
         # Guard: reject new tool calls beyond the limit
-        if index not in self.calls and len(self.calls) >= self.max_tool_calls:
+        if index not in self._calls and len(self._calls) >= self.max_tool_calls:
             logger.warning(
                 "Rejecting tool call at index {}: exceeded max_tool_calls={}",
                 index,
@@ -406,8 +406,8 @@ class ToolCallBuffer:
         ...
         events: list[ToolCallStartEvent] = []
 
-        for index in sorted(self.calls.keys()):
-            call = self.calls[index]
+        for index in sorted(self._calls.keys()):
+            call = self._calls[index]
 
             if call.started:
                 if not call.finished:
@@ -475,6 +475,17 @@ class ToolCallBuffer:
 
         return events
 
+    def finish_all(self) -> None:
+        """Finish all active tool calls that have a name."""
+        for idx in sorted(self._calls.keys()):
+            call = self._calls[idx]
+            if call.name is not None:
+                self.finish_call(idx)
+
+    def get_active_indices(self) -> list[int]:
+        """Return the sorted list of active tool call indices."""
+        return sorted(self._calls.keys())
+
     def reset(self) -> None:
         """Reset the buffer for a new request."""
-        self.calls.clear()
+        self._calls.clear()
