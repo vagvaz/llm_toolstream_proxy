@@ -8,7 +8,8 @@ from aiohttp import web
 from loguru import logger
 
 from . import config
-from .proxy import handle_health, handle_metrics, handle_proxy, on_cleanup, on_startup
+from .handlers import handle_health, handle_metrics
+from .proxy import handle_proxy, on_cleanup, on_startup
 
 
 def setup_logging() -> None:
