@@ -21,7 +21,7 @@ from typing import Any
 
 from loguru import logger
 
-from .buffering import ToolCallBuffer
+from .buffering import ToolCallBuffer, ToolCallDeltaEmit
 
 DONE_SENTINEL = "[DONE]"
 
@@ -109,10 +109,35 @@ def _extract_tool_calls(
     return tool_call_deltas, chunk
 
 
+def _build_tool_call_chunk(
+    tc_delta: ToolCallDeltaEmit,
+    index: int,
+    *,
+    id: str = "chatcmpl-tool-buffer",
+    object: str = "chat.completion.chunk",
+    created: int = 0,
+    model: str = "",
+) -> dict[str, Any]:
+    """Build an SSE chunk dict containing a single tool call delta."""
+    return {
+        "id": id,
+        "object": object,
+        "created": created,
+        "model": model,
+        "choices": [
+            {
+                "index": index,
+                "delta": {"tool_calls": [tc_delta]},
+                "finish_reason": None,
+            }
+        ],
+    }
+
+
 def _inject_tool_call_events(
     chunk: dict[str, Any],
     choice_index: int,
-    tool_call_deltas: list[dict[str, Any]],
+    tool_call_deltas: list[ToolCallDeltaEmit],
 ) -> list[dict[str, Any]]:
     """Create properly formed SSE chunk dicts with tool_call deltas
     injected into a specific choice.
@@ -120,24 +145,67 @@ def _inject_tool_call_events(
     Each delta becomes its own chunk so that downstream consumers
     process them one at a time, matching the original streaming behavior.
     """
-    events: list[dict[str, Any]] = []
-    for tc_delta in tool_call_deltas:
-        # Construct a minimal chunk with just the tool call delta
-        new_chunk: dict[str, Any] = {
-            "id": chunk.get("id", "chatcmpl-tool-buffer"),
-            "object": chunk.get("object", "chat.completion.chunk"),
-            "created": chunk.get("created", 0),
-            "model": chunk.get("model", ""),
-            "choices": [
-                {
-                    "index": choice_index,
-                    "delta": {"tool_calls": [tc_delta]},
-                    "finish_reason": None,
-                }
-            ],
-        }
-        events.append(new_chunk)
-    return events
+    return [
+        _build_tool_call_chunk(
+            tc_delta,
+            index=choice_index,
+            id=chunk.get("id", "chatcmpl-tool-buffer"),
+            object=chunk.get("object", "chat.completion.chunk"),
+            created=chunk.get("created", 0),
+            model=chunk.get("model", ""),
+        )
+        for tc_delta in tool_call_deltas
+    ]
+
+
+class SSELineBuffer:
+    """Accumulates raw SSE lines and yields complete event payloads.
+
+    Handles blank-line event boundaries and multi-line ``data:`` joining
+    per the SSE specification.  Callers feed it raw text and receive
+    complete event payloads stripped of the ``data:`` prefix.
+    """
+
+    def __init__(self) -> None:
+        self._lines: list[str] = []
+
+    def feed(self, raw_text: str) -> list[str]:
+        """Feed raw SSE text and return any complete event payloads.
+
+        Args:
+            raw_text: Raw bytes from the SSE stream (may contain multiple
+                lines and partial events).
+
+        Returns:
+            Event payloads (strings) ready for further processing.
+            Each payload has been stripped of the ``data:`` prefix and
+            multi-line payloads have been joined with ``\\n``.
+        """
+        results: list[str] = []
+        for line in raw_text.split("\n"):
+            stripped = line.strip()
+            if stripped == "":
+                if self._lines:
+                    data_lines = [
+                        line for line in self._lines if line.startswith("data:")
+                    ]
+                    self._lines = []
+                    if not data_lines:
+                        continue
+                    payloads = [
+                        line[len("data:") :].strip() for line in data_lines
+                    ]
+                    if len(payloads) == 1:
+                        results.append(payloads[0])
+                    else:
+                        results.append("\n".join(payloads))
+                continue
+            self._lines.append(line)
+        return results
+
+    def reset(self) -> None:
+        """Clear the line buffer for a fresh stream."""
+        self._lines = []
 
 
 class SSETransformer:
@@ -167,14 +235,15 @@ class SSETransformer:
             max_tool_calls=max_tool_calls,
         )
         self._done = False
-        self._line_buffer: list[str] = []
+        self._line_buffer = SSELineBuffer()
 
     def process_raw(self, raw_line: str) -> list[str]:
         """Process a raw SSE line from upstream.
 
-        Handles multi-line SSE events by buffering lines until a
-        complete event (blank line) is received. Multiple ``data:``
-        lines within a single event are concatenated per the SSE spec.
+        Delegates line buffering and multi-line event joining to
+        :class:`SSELineBuffer`.  Each complete event payload is then
+        dispatched through :meth:`_process_complete_event` for tool
+        call reassembly.
 
         Args:
             raw_line: A single line from the SSE stream (may include
@@ -188,47 +257,30 @@ class SSETransformer:
         if self._done:
             return []
 
-        # Split the raw input into individual lines and buffer them
-        # until we see a blank line (event boundary)
         output_lines: list[str] = []
-
-        # Split on newlines to handle cases where upstream sends multiple
-        # lines in a single read
-        lines = raw_line.split("\n")
-
-        for line in lines:
-            stripped = line.strip()
-
-            if stripped == "":
-                # Blank line = end of event, process buffered data
-                if self._line_buffer:
-                    data_lines = [
-                        line for line in self._line_buffer if line.startswith("data:")
-                    ]
-                    self._line_buffer = []
-
-                    if not data_lines:
-                        continue
-
-                    # Join multi-line data per SSE spec
-                    # For our JSON use case, concatenate without newlines
-                    payloads = [line[len("data:") :].strip() for line in data_lines]
-
-                    if len(payloads) == 1:
-                        payload = payloads[0]
-                    else:
-                        # Multi-line data: join with \n per SSE spec
-                        payload = "\n".join(payloads)
-
-                    # Process the complete event
-                    event_output = self._process_complete_event(payload)
-                    output_lines.extend(event_output)
-                continue
-
-            # Accumulate non-empty lines
-            self._line_buffer.append(line)
+        for payload in self._line_buffer.feed(raw_line):
+            event_output = self._process_complete_event(payload)
+            output_lines.extend(event_output)
 
         return output_lines
+
+    def _mark_finished_tool_calls(self, choices: list[dict[str, Any]]) -> None:
+        """Scan choices for finish_reason and mark matching tool calls as finished."""
+        for ch in choices:
+            finish_reason = ch.get("finish_reason")
+            if finish_reason == "tool_calls" or finish_reason == "stop":
+                choice_index = ch.get("index", 0)
+                finish_indices = list(self.buffer.calls.keys())
+                for idx in finish_indices:
+                    if self.buffer.calls[idx].name is not None:
+                        logger.debug(
+                            "Finish reason {} for choice {}: "
+                            "marking tool call {} finished",
+                            finish_reason,
+                            choice_index,
+                            idx,
+                        )
+                        self.buffer.finish_call(idx)
 
     def _process_complete_event(self, payload: str) -> list[str]:
         """Process a complete SSE event payload (after line joining)."""
@@ -258,22 +310,7 @@ class SSETransformer:
                 break
 
         if not has_tool_calls:
-            # Check for finish_reason to mark tool calls as finished
-            for ch in choices:
-                finish_reason = ch.get("finish_reason")
-                if finish_reason == "tool_calls" or finish_reason == "stop":
-                    choice_index = ch.get("index", 0)
-                    finish_indices = list(self.buffer.calls.keys())
-                    for idx in finish_indices:
-                        if self.buffer.calls[idx].name is not None:
-                            logger.debug(
-                                "Finish reason {} for choice {}: "
-                                "marking tool call {} finished",
-                                finish_reason,
-                                choice_index,
-                                idx,
-                            )
-                            self.buffer.finish_call(idx)
+            self._mark_finished_tool_calls(choices)
 
             # Re-encode the parsed event for passthrough
             return [f"data: {json.dumps(parsed, separators=(',', ':'))}\n\n"]
@@ -282,21 +319,7 @@ class SSETransformer:
 
         output_lines: list[str] = []
 
-        for ch in choices:
-            finish_reason = ch.get("finish_reason")
-            choice_index = ch.get("index", 0)
-            if finish_reason == "tool_calls" or finish_reason == "stop":
-                finish_indices = list(self.buffer.calls.keys())
-                for idx in finish_indices:
-                    if self.buffer.calls[idx].name is not None:
-                        logger.debug(
-                            "Finish reason {} for choice {}: "
-                            "marking tool call {} finished",
-                            finish_reason,
-                            choice_index,
-                            idx,
-                        )
-                        self.buffer.finish_call(idx)
+        self._mark_finished_tool_calls(choices)
 
         if tool_call_deltas:
             logger.debug(
@@ -305,7 +328,7 @@ class SSETransformer:
             )
             for choice in choices:
                 choice_index = choice.get("index", 0)
-                buffered_events: list[dict[str, Any]] = []
+                buffered_events: list[ToolCallDeltaEmit] = []
                 for tc_delta in tool_call_deltas:
                     buffered_events.extend(self.buffer.process_delta(tc_delta))
 
@@ -345,20 +368,8 @@ class SSETransformer:
                 len(flush_events),
             )
             for tc_delta in flush_events:
-                idx = tc_delta.pop("index", 0)
-                chunk: dict[str, Any] = {
-                    "id": "chatcmpl-tool-buffer",
-                    "object": "chat.completion.chunk",
-                    "created": 0,
-                    "model": "",
-                    "choices": [
-                        {
-                            "index": idx,
-                            "delta": {"tool_calls": [tc_delta]},
-                            "finish_reason": None,
-                        }
-                    ],
-                }
+                idx = tc_delta["index"]
+                chunk = _build_tool_call_chunk(tc_delta, index=idx)
                 output_lines.append(encode_sse_event(chunk))
 
         output_lines.append(encode_sse_done())
@@ -368,4 +379,4 @@ class SSETransformer:
         """Reset the transformer for a new request."""
         self.buffer.reset()
         self._done = False
-        self._line_buffer = []
+        self._line_buffer.reset()

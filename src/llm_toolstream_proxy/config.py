@@ -54,17 +54,6 @@ MAX_REQUEST_BODY_SIZE: int = int(
     os.getenv("PROXY_MAX_REQUEST_BODY_SIZE", str(1024 * 1024))
 )  # 1MB
 
-# Proxy settings for validation
-PROXY_STREAM_TIMEOUT: float = STREAM_TIMEOUT
-PROXY_STREAM_MAX_DURATION: float = STREAM_MAX_DURATION
-PROXY_CONNECT_TIMEOUT: float = CONNECT_TIMEOUT
-PROXY_REQUEST_TIMEOUT: float = REQUEST_TIMEOUT
-PROXY_KEEPALIVE_TIMEOUT: float = KEEPALIVE_TIMEOUT
-PROXY_MAX_UPSTREAM_CONNECTIONS: int = MAX_UPSTREAM_CONNECTIONS
-PROXY_MAX_ARGS_SIZE: int = MAX_ARGUMENTS_SIZE
-PROXY_MAX_REQUEST_BODY_SIZE: int = MAX_REQUEST_BODY_SIZE
-
-
 def validate_config() -> None:
     """Validate configuration values and exit with error if invalid."""
     errors = []
@@ -80,41 +69,41 @@ def validate_config() -> None:
         errors.append(f"PROXY_PORT must be between 1 and 65535, got: {PROXY_PORT}")
 
     # Validate timeout and limit values are positive
-    if PROXY_STREAM_TIMEOUT <= 0:
-        errors.append(f"PROXY_STREAM_TIMEOUT must be > 0, got: {PROXY_STREAM_TIMEOUT}")
-    if PROXY_STREAM_MAX_DURATION <= 0:
+    if STREAM_TIMEOUT <= 0:
+        errors.append(f"STREAM_TIMEOUT must be > 0, got: {STREAM_TIMEOUT}")
+    if STREAM_MAX_DURATION <= 0:
         errors.append(
-            f"PROXY_STREAM_MAX_DURATION must be > 0, got: {PROXY_STREAM_MAX_DURATION}"
+            f"STREAM_MAX_DURATION must be > 0, got: {STREAM_MAX_DURATION}"
         )
-    if PROXY_CONNECT_TIMEOUT <= 0:
+    if CONNECT_TIMEOUT <= 0:
         errors.append(
-            f"PROXY_CONNECT_TIMEOUT must be > 0, got: {PROXY_CONNECT_TIMEOUT}"
+            f"CONNECT_TIMEOUT must be > 0, got: {CONNECT_TIMEOUT}"
         )
-    if PROXY_REQUEST_TIMEOUT <= 0:
+    if REQUEST_TIMEOUT <= 0:
         errors.append(
-            f"PROXY_REQUEST_TIMEOUT must be > 0, got: {PROXY_REQUEST_TIMEOUT}"
+            f"REQUEST_TIMEOUT must be > 0, got: {REQUEST_TIMEOUT}"
         )
-    if PROXY_KEEPALIVE_TIMEOUT <= 0:
+    if KEEPALIVE_TIMEOUT <= 0:
         errors.append(
-            f"PROXY_KEEPALIVE_TIMEOUT must be > 0, got: {PROXY_KEEPALIVE_TIMEOUT}"
+            f"KEEPALIVE_TIMEOUT must be > 0, got: {KEEPALIVE_TIMEOUT}"
         )
-    if PROXY_MAX_UPSTREAM_CONNECTIONS <= 0:
+    if MAX_UPSTREAM_CONNECTIONS <= 0:
         errors.append(
-            f"PROXY_MAX_UPSTREAM_CONNECTIONS must be > 0, "
-            f"got: {PROXY_MAX_UPSTREAM_CONNECTIONS}"
+            f"MAX_UPSTREAM_CONNECTIONS must be > 0, "
+            f"got: {MAX_UPSTREAM_CONNECTIONS}"
         )
-    if PROXY_MAX_ARGS_SIZE <= 0:
-        errors.append(f"PROXY_MAX_ARGS_SIZE must be > 0, got: {PROXY_MAX_ARGS_SIZE}")
+    if MAX_ARGUMENTS_SIZE <= 0:
+        errors.append(f"MAX_ARGUMENTS_SIZE must be > 0, got: {MAX_ARGUMENTS_SIZE}")
     if MAX_TOOL_CALLS <= 0:
         errors.append(f"MAX_TOOL_CALLS must be > 0, got: {MAX_TOOL_CALLS}")
     if MAX_CONCURRENT_STREAMS <= 0:
         errors.append(
-            f"PROXY_MAX_CONCURRENT_STREAMS must be > 0, got: {MAX_CONCURRENT_STREAMS}"
+            f"MAX_CONCURRENT_STREAMS must be > 0, got: {MAX_CONCURRENT_STREAMS}"
         )
-    if PROXY_MAX_REQUEST_BODY_SIZE <= 0:
+    if MAX_REQUEST_BODY_SIZE <= 0:
         errors.append(
-            f"PROXY_MAX_REQUEST_BODY_SIZE must be > 0, "
-            f"got: {PROXY_MAX_REQUEST_BODY_SIZE}"
+            f"MAX_REQUEST_BODY_SIZE must be > 0, "
+            f"got: {MAX_REQUEST_BODY_SIZE}"
         )
 
     # Warn if STREAM_MAX_DURATION is not greater than STREAM_TIMEOUT
