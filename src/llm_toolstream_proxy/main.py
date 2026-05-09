@@ -160,9 +160,7 @@ def create_app(
         return await handle_metrics(request, metrics_collector=metrics_collector)
 
     async def _proxy(request: web.Request) -> web.StreamResponse | web.Response:
-        return await handle_proxy(
-            request, cfg=cfg, metrics_collector=metrics_collector
-        )
+        return await handle_proxy(request, cfg=cfg, metrics_collector=metrics_collector)
 
     app.router.add_get("/health", _health)
     app.router.add_get("/metrics", _metrics)

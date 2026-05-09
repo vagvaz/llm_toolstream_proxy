@@ -231,8 +231,7 @@ async def handle_streaming(
                 {
                     "error": "proxy overloaded",
                     "detail": (
-                        f"max concurrent streams "
-                        f"({cfg.MAX_CONCURRENT_STREAMS}) reached"
+                        f"max concurrent streams ({cfg.MAX_CONCURRENT_STREAMS}) reached"
                     ),
                 }
             ),
@@ -290,9 +289,7 @@ async def handle_streaming(
                     )
                 )
                 try:
-                    await asyncio.wait_for(
-                        stream_task, timeout=cfg.STREAM_MAX_DURATION
-                    )
+                    await asyncio.wait_for(stream_task, timeout=cfg.STREAM_MAX_DURATION)
                 except asyncio.TimeoutError:
                     logger.warning(
                         "[{}] Streaming request exceeded max duration ({}s), closing",

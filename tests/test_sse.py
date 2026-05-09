@@ -324,10 +324,7 @@ class TestSSELineBuffer:
 
     def test_multiple_events_in_one_feed(self):
         buf = SSELineBuffer()
-        payloads = buf.feed(
-            'data: {"a": 1}\n\n'
-            'data: {"b": 2}\n\n'
-        )
+        payloads = buf.feed('data: {"a": 1}\n\ndata: {"b": 2}\n\n')
         assert len(payloads) == 2
         assert payloads[0] == '{"a": 1}'
         assert payloads[1] == '{"b": 2}'
@@ -388,7 +385,7 @@ class TestBuildToolCallChunk:
     def test_args_delta_chunk(self):
         delta: ToolCallArgsDelta = {
             "index": 0,
-            "function": {"arguments": '{"cmd":' },
+            "function": {"arguments": '{"cmd":'},
         }
         chunk = _build_tool_call_chunk(delta, index=3)
 

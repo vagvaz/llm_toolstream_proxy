@@ -131,13 +131,23 @@ async def handle_proxy(
     try:
         if is_streaming and cfg.BUFFER_TOOL_CALLS and path in STREAMING_ROUTES:
             result = await handle_streaming(
-                request, url, headers, body, req_metrics,
-                cfg=cfg, metrics_collector=metrics_collector,
+                request,
+                url,
+                headers,
+                body,
+                req_metrics,
+                cfg=cfg,
+                metrics_collector=metrics_collector,
             )
             return result
         else:
             result = await _handle_non_streaming(
-                request, url, headers, body, method, req_metrics,
+                request,
+                url,
+                headers,
+                body,
+                method,
+                req_metrics,
                 cfg=cfg,
             )
             return result

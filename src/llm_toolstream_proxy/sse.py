@@ -170,9 +170,7 @@ class SSELineBuffer:
                     self._lines = []
                     if not data_lines:
                         continue
-                    payloads = [
-                        line[len("data:") :].strip() for line in data_lines
-                    ]
+                    payloads = [line[len("data:") :].strip() for line in data_lines]
                     if len(payloads) == 1:
                         results.append(payloads[0])
                     else:

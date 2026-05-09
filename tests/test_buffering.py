@@ -1,6 +1,5 @@
 """Tests for the ToolCallBuffer core algorithm."""
 
-
 from llm_toolstream_proxy.buffering import (
     BufferedToolCall,
     ToolCallBuffer,

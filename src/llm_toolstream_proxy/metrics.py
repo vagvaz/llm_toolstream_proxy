@@ -117,6 +117,3 @@ class MetricsCollector:
 
 # Global metrics collector
 collector = MetricsCollector()
-
-
-

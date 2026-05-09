@@ -44,13 +44,9 @@ class Config:
         os.getenv("PROXY_MAX_UPSTREAM_CONNECTIONS", "100")
     )
     KEEPALIVE_TIMEOUT: float = float(os.getenv("PROXY_KEEPALIVE_TIMEOUT", "30"))
-    MAX_ARGUMENTS_SIZE: int = int(
-        os.getenv("PROXY_MAX_ARGS_SIZE", str(1024 * 1024))
-    )
+    MAX_ARGUMENTS_SIZE: int = int(os.getenv("PROXY_MAX_ARGS_SIZE", str(1024 * 1024)))
     MAX_TOOL_CALLS: int = int(os.getenv("PROXY_MAX_TOOL_CALLS", "32"))
-    MAX_CONCURRENT_STREAMS: int = int(
-        os.getenv("PROXY_MAX_CONCURRENT_STREAMS", "50")
-    )
+    MAX_CONCURRENT_STREAMS: int = int(os.getenv("PROXY_MAX_CONCURRENT_STREAMS", "50"))
     MAX_REQUEST_BODY_SIZE: int = int(
         os.getenv("PROXY_MAX_REQUEST_BODY_SIZE", str(1024 * 1024))
     )
@@ -79,21 +75,15 @@ class Config:
             )
 
         if self.STREAM_TIMEOUT <= 0:
-            errors.append(
-                f"STREAM_TIMEOUT must be > 0, got: {self.STREAM_TIMEOUT}"
-            )
+            errors.append(f"STREAM_TIMEOUT must be > 0, got: {self.STREAM_TIMEOUT}")
         if self.STREAM_MAX_DURATION <= 0:
             errors.append(
                 f"STREAM_MAX_DURATION must be > 0, got: {self.STREAM_MAX_DURATION}"
             )
         if self.CONNECT_TIMEOUT <= 0:
-            errors.append(
-                f"CONNECT_TIMEOUT must be > 0, got: {self.CONNECT_TIMEOUT}"
-            )
+            errors.append(f"CONNECT_TIMEOUT must be > 0, got: {self.CONNECT_TIMEOUT}")
         if self.REQUEST_TIMEOUT <= 0:
-            errors.append(
-                f"REQUEST_TIMEOUT must be > 0, got: {self.REQUEST_TIMEOUT}"
-            )
+            errors.append(f"REQUEST_TIMEOUT must be > 0, got: {self.REQUEST_TIMEOUT}")
         if self.KEEPALIVE_TIMEOUT <= 0:
             errors.append(
                 f"KEEPALIVE_TIMEOUT must be > 0, got: {self.KEEPALIVE_TIMEOUT}"
@@ -108,9 +98,7 @@ class Config:
                 f"MAX_ARGUMENTS_SIZE must be > 0, got: {self.MAX_ARGUMENTS_SIZE}"
             )
         if self.MAX_TOOL_CALLS <= 0:
-            errors.append(
-                f"MAX_TOOL_CALLS must be > 0, got: {self.MAX_TOOL_CALLS}"
-            )
+            errors.append(f"MAX_TOOL_CALLS must be > 0, got: {self.MAX_TOOL_CALLS}")
         if self.MAX_CONCURRENT_STREAMS <= 0:
             errors.append(
                 f"MAX_CONCURRENT_STREAMS must be > 0, "
@@ -118,8 +106,7 @@ class Config:
             )
         if self.MAX_REQUEST_BODY_SIZE <= 0:
             errors.append(
-                f"MAX_REQUEST_BODY_SIZE must be > 0, "
-                f"got: {self.MAX_REQUEST_BODY_SIZE}"
+                f"MAX_REQUEST_BODY_SIZE must be > 0, got: {self.MAX_REQUEST_BODY_SIZE}"
             )
 
         if self.STREAM_MAX_DURATION <= self.STREAM_TIMEOUT:
